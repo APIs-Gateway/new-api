@@ -3397,6 +3397,8 @@
     "Save tool prices": "保存工具价格",
     "Save Waffo Pancake settings": "保存 Waffo Pancake 设置",
     "Save Worker settings": "保存 Worker 设置",
+    "Session Archive": "会话归档",
+    "Choose which models have full request and response context written to JSONL.": "选择哪些模型会将完整请求和响应上下文写入 JSONL。",
     "Saved successfully": "保存成功",
     "Saving...": "正在保存...",
     "Scan QR Code": "扫描二维码",

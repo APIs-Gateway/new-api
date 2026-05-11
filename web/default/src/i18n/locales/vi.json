@@ -3397,6 +3397,8 @@
     "Save tool prices": "Lưu giá công cụ",
     "Save Waffo Pancake settings": "Lưu cài đặt Waffo Pancake",
     "Save Worker settings": "Lưu cài đặt Worker",
+    "Session Archive": "Lưu trữ phiên",
+    "Choose which models have full request and response context written to JSONL.": "Chọn các mô hình có ngữ cảnh yêu cầu và phản hồi đầy đủ được ghi vào JSONL.",
     "Saved successfully": "Lưu thành công",
     "Saving...": "Đang lưu...",
     "Scan QR Code": "Quét mã QR",

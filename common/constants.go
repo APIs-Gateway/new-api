@@ -47,7 +47,12 @@ var TaskEnabled = true
 var DataExportEnabled = true
 var DataExportInterval = 5         // unit: minute
 var DataExportDefaultTime = "hour" // unit: minute
+var SessionArchiveEnabled = true
+var SessionArchiveDir = ""
 var DefaultCollapseSidebar = false // default value of collapse sidebar
+
+// SessionArchiveEnabledModelsOptionKey stores the model-name whitelist used by session archive capture.
+const SessionArchiveEnabledModelsOptionKey = "session_archive_setting.enabled_models"
 
 // Any options with "Secret", "Token" in its key won't be return by GetOptions
 

@@ -66,4 +66,7 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
+
+	// ContextKeySessionArchiveCapture stores the per-request session archive capture object.
+	ContextKeySessionArchiveCapture ContextKey = "session_archive_capture"
 )

@@ -74,6 +74,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	var (
 		newAPIError *types.NewAPIError
 		ws          *websocket.Conn
+		request     dto.Request
+		relayInfo   *relaycommon.RelayInfo
 	)
 
 	if relayFormat == types.RelayFormatOpenAIRealtime {
@@ -85,6 +87,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		defer ws.Close()
 	}
+
+	defer func() {
+		if relayInfo != nil {
+			service.FinalizeSessionArchive(c, relayInfo, request, newAPIError)
+		}
+	}()
 
 	defer func() {
 		if newAPIError != nil {
@@ -106,7 +114,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}()
 
-	request, err := helper.GetAndValidateRequest(c, relayFormat)
+	var err error
+	request, err = helper.GetAndValidateRequest(c, relayFormat)
 	if err != nil {
 		// Map "request body too large" to 413 so clients can handle it correctly
 		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
@@ -117,11 +126,20 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
-	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
+	relayInfo, err = relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
 	}
+
+	bodyStorage, bodyErr := common.GetBodyStorage(c)
+	rawRequestBody := ""
+	if bodyErr == nil {
+		if bodyBytes, bytesErr := bodyStorage.Bytes(); bytesErr == nil {
+			rawRequestBody = string(bodyBytes)
+		}
+	}
+	service.StartSessionArchiveCapture(c, relayInfo, request, rawRequestBody)
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken

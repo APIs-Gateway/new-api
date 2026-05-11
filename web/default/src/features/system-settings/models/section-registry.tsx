@@ -24,6 +24,7 @@ import { ClaudeSettingsCard } from './claude-settings-card'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
+import { SessionArchiveSettingsCard } from './session-archive-settings-card'
 
 function formatJsonForEditor(value: string, fallback: string) {
   const raw = (value ?? '').toString().trim()
@@ -61,6 +62,20 @@ const MODELS_SECTIONS = [
             ping_interval_seconds:
               settings['general_setting.ping_interval_seconds'],
           },
+        }}
+      />
+    ),
+  },
+  {
+    id: 'session-archive',
+    titleKey: 'Session Archive',
+    descriptionKey:
+      'Choose which models have full request and response context written to JSONL.',
+    build: (settings: ModelSettings) => (
+      <SessionArchiveSettingsCard
+        defaultValues={{
+          'session_archive_setting.enabled_models':
+            settings['session_archive_setting.enabled_models'],
         }}
       />
     ),

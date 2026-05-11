@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,36 @@ import (
 type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
 	Value string `json:"value"`
+}
+
+func getSessionArchiveEnabledModelsOptionValue() string {
+	var modelNames []string
+	if err := DB.Model(&Model{}).Order("model_name ASC").Pluck("model_name", &modelNames).Error; err != nil {
+		common.SysLog("failed to load session archive enabled models: " + err.Error())
+		return "[]"
+	}
+	filtered := make([]string, 0, len(modelNames))
+	seen := make(map[string]struct{}, len(modelNames))
+	for _, modelName := range modelNames {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" {
+			continue
+		}
+		if _, ok := seen[modelName]; ok {
+			continue
+		}
+		seen[modelName] = struct{}{}
+		filtered = append(filtered, modelName)
+	}
+	if len(filtered) > 1 {
+		sort.Strings(filtered)
+	}
+	jsonBytes, err := common.Marshal(filtered)
+	if err != nil {
+		common.SysLog("failed to marshal session archive enabled models: " + err.Error())
+		return "[]"
+	}
+	return string(jsonBytes)
 }
 
 func AllOption() ([]*Option, error) {
@@ -177,6 +208,7 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
+	common.OptionMap[common.SessionArchiveEnabledModelsOptionKey] = getSessionArchiveEnabledModelsOptionValue()
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()

@@ -27,6 +27,7 @@ const defaultModelSettings: ModelSettings = {
   'global.pass_through_request_enabled': false,
   'global.thinking_model_blacklist': '[]',
   'global.chat_completions_to_responses_policy': '{}',
+  'session_archive_setting.enabled_models': '[]',
   'general_setting.ping_interval_enabled': false,
   'general_setting.ping_interval_seconds': 60,
   'gemini.safety_settings': '',

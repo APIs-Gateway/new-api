@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -67,6 +68,34 @@ func buildCompletionRatioMetaValue(optionValues map[string]string) string {
 		return "{}"
 	}
 	return string(jsonBytes)
+}
+
+func normalizeStringListOptionValue(raw string) (string, error) {
+	var values []string
+	if err := common.UnmarshalJsonStr(raw, &values); err != nil {
+		return "", err
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	sort.Strings(normalized)
+
+	jsonBytes, err := common.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return string(jsonBytes), nil
 }
 
 func GetOptions(c *gin.Context) {
@@ -275,6 +304,15 @@ func UpdateOption(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": err.Error(),
+			})
+			return
+		}
+	case common.SessionArchiveEnabledModelsOptionKey:
+		option.Value, err = normalizeStringListOptionValue(option.Value.(string))
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "会话归档模型列表必须是字符串数组 JSON",
 			})
 			return
 		}

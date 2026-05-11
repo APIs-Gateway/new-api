@@ -3397,6 +3397,8 @@
     "Save tool prices": "Save tool prices",
     "Save Waffo Pancake settings": "Save Waffo Pancake settings",
     "Save Worker settings": "Save Worker settings",
+    "Session Archive": "Session Archive",
+    "Choose which models have full request and response context written to JSONL.": "Choose which models have full request and response context written to JSONL.",
     "Saved successfully": "Saved successfully",
     "Saving...": "Saving...",
     "Scan QR Code": "Scan QR Code",

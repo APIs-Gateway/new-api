@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -121,16 +122,20 @@ func Done(c *gin.Context) {
 	_ = StringData(c, "[DONE]")
 }
 
-func WssString(c *gin.Context, ws *websocket.Conn, str string) error {
+func WssString(c *gin.Context, ws *websocket.Conn, kind string, str string) error {
 	if ws == nil {
 		logger.LogError(c, "websocket connection is nil")
 		return errors.New("websocket connection is nil")
 	}
 	//common.LogInfo(c, fmt.Sprintf("sending message: %s", str))
-	return ws.WriteMessage(1, []byte(str))
+	err := ws.WriteMessage(1, []byte(str))
+	if err == nil {
+		service.AppendSessionArchiveWSMessage(c, kind, str)
+	}
+	return err
 }
 
-func WssObject(c *gin.Context, ws *websocket.Conn, object interface{}) error {
+func WssObject(c *gin.Context, ws *websocket.Conn, kind string, object interface{}) error {
 	jsonData, err := common.Marshal(object)
 	if err != nil {
 		return fmt.Errorf("error marshalling object: %w", err)
@@ -140,7 +145,11 @@ func WssObject(c *gin.Context, ws *websocket.Conn, object interface{}) error {
 		return errors.New("websocket connection is nil")
 	}
 	//common.LogInfo(c, fmt.Sprintf("sending message: %s", jsonData))
-	return ws.WriteMessage(1, jsonData)
+	err = ws.WriteMessage(1, jsonData)
+	if err == nil {
+		service.AppendSessionArchiveWSMessage(c, kind, string(jsonData))
+	}
+	return err
 }
 
 func WssError(c *gin.Context, ws *websocket.Conn, openaiError types.OpenAIError) {
@@ -152,7 +161,7 @@ func WssError(c *gin.Context, ws *websocket.Conn, openaiError types.OpenAIError)
 		EventId: GetLocalRealtimeID(c),
 		Error:   &openaiError,
 	}
-	_ = WssObject(c, ws, errorObj)
+	_ = WssObject(c, ws, "ws:error", errorObj)
 }
 
 func GetResponseID(c *gin.Context) string {
