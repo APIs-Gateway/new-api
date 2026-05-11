@@ -21,6 +21,7 @@ import React, { useState } from 'react';
 import { Banner, Button, Modal } from '@douyinfe/semi-ui';
 import { IconAlertTriangle, IconClose } from '@douyinfe/semi-icons';
 import CardPro from '../../common/ui/CardPro';
+import SessionArchiveSettings from './SessionArchiveSettings';
 import ModelsTable from './ModelsTable';
 import ModelsActions from './ModelsActions';
 import ModelsFilters from './ModelsFilters';
@@ -129,6 +130,8 @@ const ModelsPage = () => {
           refresh();
         }}
       />
+
+      <SessionArchiveSettings />
 
       {showMarketplaceDisplayNotice ? (
         <div style={{ position: 'relative', marginBottom: 12 }}>
