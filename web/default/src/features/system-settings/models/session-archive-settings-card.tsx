@@ -17,14 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { CheckSquare, RefreshCcw, Save, Search, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
-import { getPricing } from '@/features/pricing/api'
+import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 
@@ -73,28 +72,18 @@ function parseModelNames(raw: string) {
   }
 }
 
-async function fetchAllModelNames() {
-  const response = await getPricing()
-  if (!response.success || !Array.isArray(response.data)) {
-    throw new Error(response.message || 'Failed to load')
-  }
-
-  return normalizeModelNames(
-    response.data.reduce<string[]>((acc, item) => {
-      if (item.model_name) {
-        acc.push(item.model_name)
-      }
-      return acc
-    }, [])
-  )
-}
-
 export function SessionArchiveSettingsCard({
   defaultValues,
 }: SessionArchiveSettingsCardProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const [search, setSearch] = useState('')
+  const {
+    models,
+    isLoading: isModelsLoading,
+    error: modelsError,
+    refetch: refetchModels,
+  } = usePricingData()
   const defaultModelNames = useMemo(
     () => parseModelNames(defaultValues[SESSION_ARCHIVE_ENABLED_MODELS_KEY]),
     [defaultValues[SESSION_ARCHIVE_ENABLED_MODELS_KEY]]
@@ -107,13 +96,15 @@ export function SessionArchiveSettingsCard({
     setSelectedModelNames(defaultModelNames)
   }, [defaultModelNames])
 
-  const modelsQuery = useQuery({
-    queryKey: ['system-settings', 'session-archive-models'],
-    queryFn: fetchAllModelNames,
-    staleTime: 5 * 60 * 1000,
-  })
-
-  const availableModelNames = modelsQuery.data ?? []
+  const availableModelNames = useMemo(
+    () =>
+      normalizeModelNames(
+        (models ?? []).flatMap((model) =>
+          model.model_name ? [model.model_name] : []
+        )
+      ),
+    [models]
+  )
   const allSelectableModelNames = useMemo(
     () => normalizeModelNames([...availableModelNames, ...selectedModelNames]),
     [availableModelNames, selectedModelNames]
@@ -219,12 +210,12 @@ export function SessionArchiveSettingsCard({
               type='button'
               variant='outline'
               size='sm'
-              onClick={() => void modelsQuery.refetch()}
-              disabled={modelsQuery.isFetching}
+              onClick={() => void refetchModels()}
+              disabled={isModelsLoading}
             >
               <RefreshCcw
                 className={
-                  modelsQuery.isFetching
+                  isModelsLoading
                     ? 'mr-2 size-4 animate-spin'
                     : 'mr-2 size-4'
                 }
@@ -234,12 +225,12 @@ export function SessionArchiveSettingsCard({
           </div>
         </div>
 
-        {modelsQuery.isError ? (
+        {modelsError ? (
           <div className='text-destructive text-sm'>{t('Failed to load')}</div>
         ) : null}
 
         <div className='border-border divide-y rounded-lg border'>
-          {modelsQuery.isLoading && allSelectableModelNames.length === 0 ? (
+          {isModelsLoading && allSelectableModelNames.length === 0 ? (
             <div className='text-muted-foreground py-8 text-center text-sm'>
               {t('Loading...')}
             </div>
