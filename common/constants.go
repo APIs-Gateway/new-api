@@ -54,6 +54,9 @@ var DefaultCollapseSidebar = false // default value of collapse sidebar
 // SessionArchiveEnabledModelsOptionKey stores the model-name whitelist used by session archive capture.
 const SessionArchiveEnabledModelsOptionKey = "session_archive_setting.enabled_models"
 
+// SessionArchiveModelAliasesOptionKey stores model-name rewrite aliases used only for session archive output.
+const SessionArchiveModelAliasesOptionKey = "session_archive_setting.model_aliases"
+
 // Any options with "Secret", "Token" in its key won't be return by GetOptions
 
 var SessionSecret = uuid.New().String()

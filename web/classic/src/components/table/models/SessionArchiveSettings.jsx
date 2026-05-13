@@ -31,7 +31,8 @@ import { useTranslation } from 'react-i18next';
 
 const SESSION_ARCHIVE_ENABLED_MODELS_KEY =
   'session_archive_setting.enabled_models';
-const MODEL_LIST_PAGE_SIZE = 200;
+const SESSION_ARCHIVE_MODEL_ALIASES_KEY =
+  'session_archive_setting.model_aliases';
 
 function normalizeModelNames(values = []) {
   const seen = new Set();
@@ -69,40 +70,54 @@ function parseModelNames(raw) {
   }
 }
 
-async function fetchAllModelNames() {
-  const modelNames = [];
-  let page = 1;
+function normalizeModelAliases(values = {}) {
+  const normalized = {};
 
-  for (;;) {
-    const res = await API.get(
-      `/api/models/?p=${page}&page_size=${MODEL_LIST_PAGE_SIZE}`,
-    );
-    const { success, message, data } = res.data;
-    if (!success) {
-      throw new Error(message || 'Failed to retrieve model list');
+  Object.entries(values).forEach(([source, target]) => {
+    const sourceName = String(source ?? '').trim();
+    const targetName = String(target ?? '').trim();
+    if (!sourceName || !targetName || sourceName === targetName) {
+      return;
     }
+    normalized[sourceName] = targetName;
+  });
 
-    const items = Array.isArray(data?.items)
-      ? data.items
-      : Array.isArray(data)
-        ? data
-        : [];
+  return Object.fromEntries(
+    Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
 
-    items.forEach((item) => {
-      if (item?.model_name) {
-        modelNames.push(item.model_name);
-      }
-    });
-
-    const total = Number(data?.total ?? modelNames.length);
-    if (modelNames.length >= total || items.length < MODEL_LIST_PAGE_SIZE) {
-      break;
-    }
-
-    page += 1;
+function parseModelAliases(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) {
+    return {};
   }
 
-  return normalizeModelNames(modelNames);
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      return {};
+    }
+    const aliases = {};
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (typeof value === 'string') {
+        aliases[key] = value;
+      }
+    });
+    return normalizeModelAliases(aliases);
+  } catch {
+    return {};
+  }
+}
+
+async function fetchAllModelNames() {
+  const res = await API.get('/api/channel/models_enabled');
+  const { success, message, data } = res.data;
+  if (!success) {
+    throw new Error(message || 'Failed to retrieve model list');
+  }
+
+  return normalizeModelNames(Array.isArray(data) ? data : []);
 }
 
 async function fetchCurrentEnabledModels() {
@@ -119,11 +134,27 @@ async function fetchCurrentEnabledModels() {
   return option?.value ?? '[]';
 }
 
+async function fetchCurrentModelAliases() {
+  const res = await API.get('/api/option/');
+  const { success, message, data } = res.data;
+  if (!success) {
+    throw new Error(message || 'Failed to load options');
+  }
+
+  const option = Array.isArray(data)
+    ? data.find((item) => item.key === SESSION_ARCHIVE_MODEL_ALIASES_KEY)
+    : null;
+
+  return option?.value ?? '{}';
+}
+
 const SessionArchiveSettings = () => {
   const { t } = useTranslation();
   const [availableModelNames, setAvailableModelNames] = useState([]);
   const [selectedModelNames, setSelectedModelNames] = useState([]);
   const [savedModelNames, setSavedModelNames] = useState([]);
+  const [modelAliases, setModelAliases] = useState({});
+  const [savedModelAliases, setSavedModelAliases] = useState({});
   const [searchText, setSearchText] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -131,14 +162,18 @@ const SessionArchiveSettings = () => {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [modelNames, rawEnabledModels] = await Promise.all([
+      const [modelNames, rawEnabledModels, rawModelAliases] = await Promise.all([
         fetchAllModelNames(),
         fetchCurrentEnabledModels(),
+        fetchCurrentModelAliases(),
       ]);
       const parsedSelected = parseModelNames(rawEnabledModels);
+      const parsedAliases = parseModelAliases(rawModelAliases);
       setAvailableModelNames(modelNames);
       setSelectedModelNames(parsedSelected);
       setSavedModelNames(parsedSelected);
+      setModelAliases(parsedAliases);
+      setSavedModelAliases(parsedAliases);
     } catch (error) {
       console.error(error);
       showError(error?.message || t('加载失败'));
@@ -158,6 +193,29 @@ const SessionArchiveSettings = () => {
   const normalizedSavedModelNames = useMemo(
     () => normalizeModelNames(savedModelNames),
     [savedModelNames],
+  );
+  const normalizedModelAliases = useMemo(() => {
+    const selected = new Set(normalizedSelectedModelNames);
+    const aliases = {};
+    Object.entries(modelAliases).forEach(([source, target]) => {
+      if (selected.has(source)) {
+        aliases[source] = target;
+      }
+    });
+    return normalizeModelAliases(aliases);
+  }, [modelAliases, normalizedSelectedModelNames]);
+  const normalizedSavedModelAliases = useMemo(
+    () => {
+      const selected = new Set(normalizedSavedModelNames);
+      const aliases = {};
+      Object.entries(savedModelAliases).forEach(([source, target]) => {
+        if (selected.has(source)) {
+          aliases[source] = target;
+        }
+      });
+      return normalizeModelAliases(aliases);
+    },
+    [normalizedSavedModelNames, savedModelAliases],
   );
   const allSelectableModelNames = useMemo(
     () =>
@@ -181,8 +239,14 @@ const SessionArchiveSettings = () => {
     );
   }, [allSelectableModelNames, searchText]);
   const isDirty =
-    JSON.stringify(normalizedSelectedModelNames) !==
-    JSON.stringify(normalizedSavedModelNames);
+    JSON.stringify({
+      models: normalizedSelectedModelNames,
+      aliases: normalizedModelAliases,
+    }) !==
+    JSON.stringify({
+      models: normalizedSavedModelNames,
+      aliases: normalizedSavedModelAliases,
+    });
 
   const handleToggleModel = (modelName, checked) => {
     setSelectedModelNames((current) => {
@@ -195,6 +259,13 @@ const SessionArchiveSettings = () => {
 
   const handleSelectAll = () => {
     setSelectedModelNames(allSelectableModelNames);
+  };
+
+  const handleAliasChange = (modelName, alias) => {
+    setModelAliases((current) => ({
+      ...current,
+      [modelName]: alias,
+    }));
   };
 
   const handleClearAll = () => {
@@ -213,11 +284,22 @@ const SessionArchiveSettings = () => {
         value: JSON.stringify(normalizedSelectedModelNames),
       });
       const { success, message } = res.data;
-      if (success) {
+      if (!success) {
+        showError(message || t('保存失败，请重试'));
+        return;
+      }
+
+      const aliasRes = await API.put('/api/option/', {
+        key: SESSION_ARCHIVE_MODEL_ALIASES_KEY,
+        value: JSON.stringify(normalizedModelAliases),
+      });
+      const { success: aliasSuccess, message: aliasMessage } = aliasRes.data;
+      if (aliasSuccess) {
         setSavedModelNames(normalizedSelectedModelNames);
+        setSavedModelAliases(normalizedModelAliases);
         showSuccess(t('保存成功'));
       } else {
-        showError(message || t('保存失败，请重试'));
+        showError(aliasMessage || t('保存失败，请重试'));
       }
     } catch (error) {
       showError(error?.response?.data?.message || t('保存失败，请重试'));
@@ -314,20 +396,36 @@ const SessionArchiveSettings = () => {
               filteredModelNames.map((modelName) => {
                 const checked = selectedModelNameSet.has(modelName);
                 return (
-                  <label
+                  <div
                     key={modelName}
-                    className='flex cursor-pointer items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-[var(--semi-color-fill-0)]'
+                    className='flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-[var(--semi-color-fill-0)] sm:flex-row sm:items-center sm:gap-3'
                   >
-                    <Checkbox
-                      checked={checked}
-                      onChange={(event) =>
-                        handleToggleModel(modelName, event.target.checked)
-                      }
-                    />
-                    <span className='min-w-0 flex-1 break-all text-sm'>
-                      {modelName}
-                    </span>
-                  </label>
+                    <div className='flex min-w-0 flex-1 items-center gap-3'>
+                      <Checkbox
+                        aria-label={modelName}
+                        checked={checked}
+                        onChange={(event) =>
+                          handleToggleModel(modelName, event.target.checked)
+                        }
+                      />
+                      <button
+                        type='button'
+                        onClick={() => handleToggleModel(modelName, !checked)}
+                        className='min-w-0 flex-1 cursor-pointer break-all border-0 bg-transparent p-0 text-left text-sm text-inherit'
+                      >
+                        {modelName}
+                      </button>
+                    </div>
+                    {checked ? (
+                      <Input
+                        value={modelAliases[modelName] || ''}
+                        onChange={(value) => handleAliasChange(modelName, value)}
+                        placeholder={t('归档为')}
+                        aria-label={t('归档为 {{model}}', { model: modelName })}
+                        style={{ width: 260, maxWidth: '100%' }}
+                      />
+                    ) : null}
+                  </div>
                 );
               })
             )}

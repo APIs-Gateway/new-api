@@ -4412,6 +4412,8 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Archive as": "Lưu trữ dưới tên",
+    "Archive as {{model}}": "Lưu trữ {{model}} dưới tên"
   }
 }

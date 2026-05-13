@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,91 @@ func TestBuildCleanSessionArchiveRecord(t *testing.T) {
 	}
 }
 
+func TestBuildCleanSessionArchiveRecordRewritesArchiveModelFields(t *testing.T) {
+	raw := &sessionArchiveRawRecord{
+		RecordType:      sessionArchiveRecordType,
+		RequestMethod:   "POST",
+		IsStream:        true,
+		OriginModelName: "claude-opus-4-6",
+		UpstreamModel:   "claude-opus-4-6",
+		RequestObject: map[string]any{
+			"model":    "claude-opus-4-7",
+			"messages": []any{map[string]any{"role": "user", "content": "use claude-opus-4-7 literally"}},
+		},
+		RequestBody:  `{"model":"claude-opus-4-7","messages":[{"role":"user","content":"use claude-opus-4-7 literally"}]}`,
+		ResponseBody: "data: {\"model\":\"claude-opus-4-7\",\"upstream_model\":\"claude-opus-4-7\",\"downstream_model\":\"claude-opus-4-7\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n",
+		ResponseText: "hello",
+	}
+
+	cleaned := buildCleanSessionArchiveRecord(raw)
+	if cleaned == nil {
+		t.Fatal("expected cleaned record")
+	}
+	if cleaned.OriginModelName != "claude-opus-4-6" || cleaned.UpstreamModel != "claude-opus-4-6" {
+		t.Fatalf("unexpected model metadata: %+v", cleaned)
+	}
+	requestObject, ok := cleaned.RequestObject.(map[string]any)
+	if !ok {
+		t.Fatalf("expected request_object map, got %T", cleaned.RequestObject)
+	}
+	if requestObject["model"] != "claude-opus-4-6" {
+		t.Fatalf("expected request_object.model to be rewritten, got %#v", requestObject["model"])
+	}
+	messages, ok := requestObject["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("expected request_object.messages to be preserved, got %#v", requestObject["messages"])
+	}
+	message, ok := messages[0].(map[string]any)
+	if !ok || message["content"] != "use claude-opus-4-7 literally" {
+		t.Fatalf("expected message content to be preserved, got %#v", messages[0])
+	}
+	if cleaned.RequestBody != "" {
+		t.Fatalf("expected request_body to be removed when request_object exists, got %q", cleaned.RequestBody)
+	}
+	if !strings.Contains(cleaned.ResponseBody, `"model":"claude-opus-4-6"`) {
+		t.Fatalf("expected response_body model rewrite, got %s", cleaned.ResponseBody)
+	}
+	if !strings.Contains(cleaned.ResponseBody, `"upstream_model":"claude-opus-4-6"`) {
+		t.Fatalf("expected response_body upstream model rewrite, got %s", cleaned.ResponseBody)
+	}
+	if !strings.Contains(cleaned.ResponseBody, `"downstream_model":"claude-opus-4-6"`) {
+		t.Fatalf("expected response_body downstream model rewrite, got %s", cleaned.ResponseBody)
+	}
+	if !strings.Contains(cleaned.ResponseBody, "data: [DONE]") {
+		t.Fatalf("expected DONE marker to be preserved, got %s", cleaned.ResponseBody)
+	}
+	if strings.Contains(cleaned.ResponseBody, "claude-opus-4-7") {
+		t.Fatalf("expected response model name to be rewritten, got %s", cleaned.ResponseBody)
+	}
+	if cleaned.ResponseText != "hello" {
+		t.Fatalf("unexpected response_text: %q", cleaned.ResponseText)
+	}
+}
+
+func TestSessionArchiveModelAlias(t *testing.T) {
+	common.OptionMapRWMutex.Lock()
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{
+		common.SessionArchiveModelAliasesOptionKey: `{"claude-opus-4-7":"claude-opus-4-6","empty":" "}`,
+	}
+	common.OptionMapRWMutex.Unlock()
+	defer func() {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = originalMap
+		common.OptionMapRWMutex.Unlock()
+	}()
+
+	if got := sessionArchiveModelAlias("claude-opus-4-7"); got != "claude-opus-4-6" {
+		t.Fatalf("alias = %q, want claude-opus-4-6", got)
+	}
+	if got := sessionArchiveModelAlias("claude-opus-4-6"); got != "claude-opus-4-6" {
+		t.Fatalf("fallback alias = %q, want original model", got)
+	}
+	if got := sessionArchiveModelAlias("empty"); got != "empty" {
+		t.Fatalf("empty alias = %q, want original model", got)
+	}
+}
+
 func TestShouldKeepSessionArchiveRecord(t *testing.T) {
 	base := &sessionArchiveRawRecord{
 		TurnComplete:       true,
@@ -108,6 +194,31 @@ func TestShouldKeepSessionArchiveRecord(t *testing.T) {
 	}
 	if shouldKeepSessionArchiveRecord(non200) {
 		t.Fatal("expected non-200 record to be filtered out")
+	}
+}
+
+func TestAppendSessionArchiveRecordUsesArchiveModelPath(t *testing.T) {
+	tempDir := t.TempDir()
+	originalDir := common.SessionArchiveDir
+	common.SessionArchiveDir = tempDir
+	defer func() {
+		common.SessionArchiveDir = originalDir
+	}()
+
+	startedAt := time.Date(2026, 5, 13, 12, 0, 0, 0, time.Local)
+	record := &SessionArchiveRecord{
+		RecordType:      sessionArchiveRecordType,
+		OriginModelName: "claude-opus-4-6",
+		UpstreamModel:   "claude-opus-4-6",
+		PromptTokens:    1,
+	}
+	if err := appendSessionArchiveRecord(record, "claude-opus-4-6", startedAt); err != nil {
+		t.Fatalf("appendSessionArchiveRecord returned error: %v", err)
+	}
+
+	expectedPath := filepath.Join(tempDir, "claude-opus-4-6", "session-20260513.jsonl")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("expected archive at %s: %v", expectedPath, err)
 	}
 }
 

@@ -76,6 +76,8 @@ const MODELS_SECTIONS = [
         defaultValues={{
           'session_archive_setting.enabled_models':
             settings['session_archive_setting.enabled_models'],
+          'session_archive_setting.model_aliases':
+            settings['session_archive_setting.model_aliases'],
         }}
       />
     ),

@@ -98,6 +98,29 @@ func normalizeStringListOptionValue(raw string) (string, error) {
 	return string(jsonBytes), nil
 }
 
+func normalizeStringMapOptionValue(raw string) (string, error) {
+	var values map[string]string
+	if err := common.UnmarshalJsonStr(raw, &values); err != nil {
+		return "", err
+	}
+
+	normalized := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" || key == value {
+			continue
+		}
+		normalized[key] = value
+	}
+
+	jsonBytes, err := common.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return string(jsonBytes), nil
+}
+
 func GetOptions(c *gin.Context) {
 	var options []*model.Option
 	optionValues := make(map[string]string)
@@ -313,6 +336,15 @@ func UpdateOption(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "会话归档模型列表必须是字符串数组 JSON",
+			})
+			return
+		}
+	case common.SessionArchiveModelAliasesOptionKey:
+		option.Value, err = normalizeStringMapOptionValue(option.Value.(string))
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "会话归档模型别名必须是字符串映射 JSON",
 			})
 			return
 		}

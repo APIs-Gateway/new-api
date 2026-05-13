@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -49,6 +50,7 @@ func GetEnabledModels() []string {
 	var models []string
 	// Find distinct models
 	DB.Table("abilities").Where("enabled = ?", true).Distinct("model").Pluck("model", &models)
+	sort.Strings(models)
 	return models
 }
 

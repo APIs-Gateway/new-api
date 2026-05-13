@@ -23,16 +23,20 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
-import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
+import { getEnabledModels } from '@/features/channels/api'
+import { useQuery } from '@tanstack/react-query'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 
 const SESSION_ARCHIVE_ENABLED_MODELS_KEY =
   'session_archive_setting.enabled_models'
+const SESSION_ARCHIVE_MODEL_ALIASES_KEY =
+  'session_archive_setting.model_aliases'
 
 type SessionArchiveSettingsCardProps = {
   defaultValues: {
     'session_archive_setting.enabled_models': string
+    'session_archive_setting.model_aliases': string
   }
 }
 
@@ -72,38 +76,93 @@ function parseModelNames(raw: string) {
   }
 }
 
+function normalizeModelAliases(values: Record<string, string>) {
+  const normalized: Record<string, string> = {}
+
+  for (const [source, target] of Object.entries(values)) {
+    const sourceName = source.trim()
+    const targetName = target.trim()
+    if (!sourceName || !targetName || sourceName === targetName) {
+      continue
+    }
+    normalized[sourceName] = targetName
+  }
+
+  return Object.fromEntries(
+    Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b))
+  )
+}
+
+function parseModelAliases(raw: string) {
+  const trimmed = (raw ?? '').trim()
+  if (!trimmed) {
+    return {}
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      return {}
+    }
+    const aliases: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string') {
+        aliases[key] = value
+      }
+    }
+    return normalizeModelAliases(aliases)
+  } catch {
+    return {}
+  }
+}
+
 export function SessionArchiveSettingsCard({
   defaultValues,
 }: SessionArchiveSettingsCardProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const [search, setSearch] = useState('')
+  const enabledModelsQuery = useQuery({
+    queryKey: ['session-archive-enabled-models'],
+    queryFn: async () => {
+      const response = await getEnabledModels()
+      if (!response.success) {
+        throw new Error(response.message || 'Failed to load')
+      }
+      return response.data ?? []
+    },
+    staleTime: 60 * 1000,
+  })
   const {
-    models,
+    data: enabledModels,
     isLoading: isModelsLoading,
     error: modelsError,
     refetch: refetchModels,
-  } = usePricingData()
+  } = enabledModelsQuery
   const defaultModelNames = useMemo(
     () => parseModelNames(defaultValues[SESSION_ARCHIVE_ENABLED_MODELS_KEY]),
     [defaultValues[SESSION_ARCHIVE_ENABLED_MODELS_KEY]]
   )
+  const defaultModelAliases = useMemo(
+    () => parseModelAliases(defaultValues[SESSION_ARCHIVE_MODEL_ALIASES_KEY]),
+    [defaultValues[SESSION_ARCHIVE_MODEL_ALIASES_KEY]]
+  )
   const [selectedModelNames, setSelectedModelNames] = useState(() =>
     defaultModelNames
   )
+  const [modelAliases, setModelAliases] = useState(() => defaultModelAliases)
 
   useEffect(() => {
     setSelectedModelNames(defaultModelNames)
   }, [defaultModelNames])
 
+  useEffect(() => {
+    setModelAliases(defaultModelAliases)
+  }, [defaultModelAliases])
+
   const availableModelNames = useMemo(
-    () =>
-      normalizeModelNames(
-        (models ?? []).flatMap((model) =>
-          model.model_name ? [model.model_name] : []
-        )
-      ),
-    [models]
+    () => normalizeModelNames(enabledModels ?? []),
+    [enabledModels]
   )
   const allSelectableModelNames = useMemo(
     () => normalizeModelNames([...availableModelNames, ...selectedModelNames]),
@@ -113,13 +172,41 @@ export function SessionArchiveSettingsCard({
     () => normalizeModelNames(selectedModelNames),
     [selectedModelNames]
   )
+  const normalizedModelAliases = useMemo(() => {
+    const selected = new Set(normalizedSelectedModelNames)
+    const selectedAliases: Record<string, string> = {}
+    for (const [source, target] of Object.entries(modelAliases)) {
+      if (selected.has(source)) {
+        selectedAliases[source] = target
+      }
+    }
+    return normalizeModelAliases(selectedAliases)
+  }, [modelAliases, normalizedSelectedModelNames])
+  const normalizedDefaultModelAliases = useMemo(() => {
+    const selected = new Set(defaultModelNames)
+    const selectedAliases: Record<string, string> = {}
+    for (const [source, target] of Object.entries(defaultModelAliases)) {
+      if (selected.has(source)) {
+        selectedAliases[source] = target
+      }
+    }
+    return normalizeModelAliases(selectedAliases)
+  }, [defaultModelAliases, defaultModelNames])
   const defaultSerialized = useMemo(
-    () => JSON.stringify(defaultModelNames),
-    [defaultModelNames]
+    () =>
+      JSON.stringify({
+        models: defaultModelNames,
+        aliases: normalizedDefaultModelAliases,
+      }),
+    [defaultModelNames, normalizedDefaultModelAliases]
   )
   const currentSerialized = useMemo(
-    () => JSON.stringify(normalizedSelectedModelNames),
-    [normalizedSelectedModelNames]
+    () =>
+      JSON.stringify({
+        models: normalizedSelectedModelNames,
+        aliases: normalizedModelAliases,
+      }),
+    [normalizedModelAliases, normalizedSelectedModelNames]
   )
   const isDirty = currentSerialized !== defaultSerialized
 
@@ -142,6 +229,13 @@ export function SessionArchiveSettingsCard({
     })
   }
 
+  const handleAliasChange = (modelName: string, alias: string) => {
+    setModelAliases((current) => ({
+      ...current,
+      [modelName]: alias,
+    }))
+  }
+
   const handleSelectAll = () => {
     setSelectedModelNames(allSelectableModelNames)
   }
@@ -152,9 +246,16 @@ export function SessionArchiveSettingsCard({
 
   const handleSave = async () => {
     try {
-      await updateOption.mutateAsync({
+      const enabledModelsResult = await updateOption.mutateAsync({
         key: SESSION_ARCHIVE_ENABLED_MODELS_KEY,
         value: JSON.stringify(normalizedSelectedModelNames),
+      })
+      if (!enabledModelsResult.success) {
+        return
+      }
+      await updateOption.mutateAsync({
+        key: SESSION_ARCHIVE_MODEL_ALIASES_KEY,
+        value: JSON.stringify(normalizedModelAliases),
       })
     } catch {
       // The mutation handler already surfaces the error via toast.
@@ -244,20 +345,40 @@ export function SessionArchiveSettingsCard({
             filteredModelNames.map((modelName) => {
               const checked = normalizedSelectedModelNames.includes(modelName)
               return (
-                <label
+                <div
                   key={modelName}
-                  className='flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/50'
+                  className='flex flex-col gap-2 px-3 py-2 hover:bg-muted/50 sm:flex-row sm:items-center sm:gap-3'
                 >
-                  <Checkbox
-                    checked={checked}
-                    onCheckedChange={(value) =>
-                      handleToggleModel(modelName, value === true)
-                    }
-                  />
-                  <span className='min-w-0 flex-1 break-all text-sm'>
-                    {modelName}
-                  </span>
-                </label>
+                  <div className='flex min-w-0 flex-1 items-center gap-3'>
+                    <Checkbox
+                      aria-label={modelName}
+                      checked={checked}
+                      onCheckedChange={(value) =>
+                        handleToggleModel(modelName, value === true)
+                      }
+                    />
+                    <button
+                      type='button'
+                      onClick={() => handleToggleModel(modelName, !checked)}
+                      className='min-w-0 flex-1 cursor-pointer break-all border-0 bg-transparent p-0 text-left text-sm text-inherit'
+                    >
+                      {modelName}
+                    </button>
+                  </div>
+                  {checked ? (
+                    <Input
+                      value={modelAliases[modelName] ?? ''}
+                      onChange={(event) =>
+                        handleAliasChange(modelName, event.target.value)
+                      }
+                      placeholder={t('Archive as')}
+                      aria-label={t('Archive as {{model}}', {
+                        model: modelName,
+                      })}
+                      className='h-8 w-full min-w-0 sm:w-64 sm:flex-none'
+                    />
+                  ) : null}
+                </div>
               )
             })
           )}

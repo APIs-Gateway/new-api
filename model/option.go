@@ -21,11 +21,7 @@ type Option struct {
 }
 
 func getSessionArchiveEnabledModelsOptionValue() string {
-	var modelNames []string
-	if err := DB.Model(&Model{}).Order("model_name ASC").Pluck("model_name", &modelNames).Error; err != nil {
-		common.SysLog("failed to load session archive enabled models: " + err.Error())
-		return "[]"
-	}
+	modelNames := GetEnabledModels()
 	filtered := make([]string, 0, len(modelNames))
 	seen := make(map[string]struct{}, len(modelNames))
 	for _, modelName := range modelNames {
@@ -209,6 +205,7 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
 	common.OptionMap[common.SessionArchiveEnabledModelsOptionKey] = getSessionArchiveEnabledModelsOptionValue()
+	common.OptionMap[common.SessionArchiveModelAliasesOptionKey] = "{}"
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()

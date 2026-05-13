@@ -28,6 +28,7 @@ const defaultModelSettings: ModelSettings = {
   'global.thinking_model_blacklist': '[]',
   'global.chat_completions_to_responses_policy': '{}',
   'session_archive_setting.enabled_models': '[]',
+  'session_archive_setting.model_aliases': '{}',
   'general_setting.ping_interval_enabled': false,
   'general_setting.ping_interval_seconds': 60,
   'gemini.safety_settings': '',

@@ -32,6 +32,7 @@ type SessionArchiveCapture struct {
 	startedAt time.Time
 
 	requestModelName string
+	archiveModelName string
 	requestBody      string
 	requestObject    any
 
@@ -163,6 +164,7 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 	if !sessionArchiveShouldCaptureModel(requestModelName) {
 		return nil
 	}
+	archiveModelName := sessionArchiveModelAlias(requestModelName)
 	startedAt := info.StartTime
 	if startedAt.IsZero() {
 		startedAt = time.Now()
@@ -170,6 +172,7 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 	capture := &SessionArchiveCapture{
 		startedAt:        startedAt,
 		requestModelName: requestModelName,
+		archiveModelName: archiveModelName,
 		requestBody:      rawRequestBody,
 		requestObject:    cloneJSONValue(request),
 	}
@@ -211,8 +214,8 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 		RecordType:         sessionArchiveRecordType,
 		RequestMethod:      c.Request.Method,
 		IsStream:           info.IsStream,
-		OriginModelName:    capture.requestModelName,
-		UpstreamModel:      info.UpstreamModelName,
+		OriginModelName:    capture.archiveModelName,
+		UpstreamModel:      capture.archiveModelName,
 		RequestObject:      cloneJSONValue(capture.requestObject),
 		RequestBody:        capture.requestBody,
 		ResponseBody:       responseBody,
@@ -232,7 +235,7 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 		return
 	}
 	record := buildCleanSessionArchiveRecord(rawRecord)
-	if err := appendSessionArchiveRecord(record, capture.requestModelName, capture.startedAt); err != nil {
+	if err := appendSessionArchiveRecord(record, capture.archiveModelName, capture.startedAt); err != nil {
 		common.SysError("failed to write session archive: " + err.Error())
 	}
 	common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, nil)
@@ -347,6 +350,29 @@ func sessionArchiveShouldCaptureModel(modelName string) bool {
 	return false
 }
 
+func sessionArchiveModelAlias(modelName string) string {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return ""
+	}
+	common.OptionMapRWMutex.RLock()
+	raw := common.OptionMap[common.SessionArchiveModelAliasesOptionKey]
+	common.OptionMapRWMutex.RUnlock()
+	if strings.TrimSpace(raw) == "" {
+		return modelName
+	}
+	var aliases map[string]string
+	if err := common.UnmarshalJsonStr(raw, &aliases); err != nil {
+		common.SysError("failed to parse session archive model aliases: " + err.Error())
+		return modelName
+	}
+	alias := strings.TrimSpace(aliases[modelName])
+	if alias == "" {
+		return modelName
+	}
+	return alias
+}
+
 func appendSessionArchiveRecord(record *SessionArchiveRecord, modelName string, startedAt time.Time) error {
 	if record == nil {
 		return nil
@@ -393,9 +419,9 @@ func buildCleanSessionArchiveRecord(record *sessionArchiveRawRecord) *SessionArc
 		IsStream:        record.IsStream,
 		OriginModelName: record.OriginModelName,
 		UpstreamModel:   record.UpstreamModel,
-		RequestObject:   cloneJSONValue(record.RequestObject),
-		RequestBody:     record.RequestBody,
-		ResponseBody:    record.ResponseBody,
+		RequestObject:   rewriteArchiveModelFields(cloneJSONValue(record.RequestObject), record.OriginModelName),
+		RequestBody:     rewriteArchiveBodyModelFields(record.RequestBody, record.OriginModelName),
+		ResponseBody:    rewriteArchiveResponseModelFields(record.ResponseBody, record.OriginModelName),
 		ResponseText:    record.ResponseText,
 		RequestHeaders:  slimSessionRequestHeaders(record.RequestHeaders),
 		ResponseUsage:   slimSessionArchiveUsage(record.ResponseUsage),
@@ -419,6 +445,136 @@ func buildCleanSessionArchiveRecord(record *sessionArchiveRawRecord) *SessionArc
 		cleaned.TotalTokens = record.TotalTokens
 	}
 	return cleaned
+}
+
+func rewriteArchiveModelFields(value any, archiveModelName string) any {
+	archiveModelName = strings.TrimSpace(archiveModelName)
+	if value == nil || archiveModelName == "" {
+		return value
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if isArchiveModelFieldKey(key) {
+				typed[key] = archiveModelName
+				continue
+			}
+			typed[key] = rewriteArchiveModelFields(item, archiveModelName)
+		}
+		return typed
+	case []any:
+		for index, item := range typed {
+			typed[index] = rewriteArchiveModelFields(item, archiveModelName)
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+func isArchiveModelFieldKey(key string) bool {
+	switch key {
+	case "model", "model_name", "origin_model_name", "original_model", "upstream_model", "downstream_model":
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteArchiveBodyModelFields(body string, archiveModelName string) string {
+	archiveModelName = strings.TrimSpace(archiveModelName)
+	if strings.TrimSpace(body) == "" || archiveModelName == "" {
+		return body
+	}
+	var payload any
+	if err := common.UnmarshalJsonStr(body, &payload); err != nil {
+		return body
+	}
+	payload = rewriteArchiveModelFields(payload, archiveModelName)
+	rewritten, err := common.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return string(rewritten)
+}
+
+func rewriteArchiveResponseModelFields(body string, archiveModelName string) string {
+	archiveModelName = strings.TrimSpace(archiveModelName)
+	if strings.TrimSpace(body) == "" || archiveModelName == "" {
+		return body
+	}
+	if hasSSEDataLine(body) {
+		return rewriteArchiveSSEModelFields(body, archiveModelName)
+	}
+	rewritten := rewriteArchiveBodyModelFields(body, archiveModelName)
+	if rewritten != body {
+		return rewritten
+	}
+	if strings.Contains(strings.TrimSpace(body), "\n") {
+		return rewriteArchiveJSONLinesModelFields(body, archiveModelName)
+	}
+	return body
+}
+
+func hasSSEDataLine(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "data:") {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteArchiveSSEModelFields(body string, archiveModelName string) string {
+	lines := strings.Split(body, "\n")
+	rewrote := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		prefixLen := strings.Index(line, "data:")
+		if prefixLen < 0 {
+			continue
+		}
+		prefix := line[:prefixLen+len("data:")]
+		payload := strings.TrimSpace(line[prefixLen+len("data:"):])
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		rewritten := rewriteArchiveBodyModelFields(payload, archiveModelName)
+		if rewritten == payload {
+			continue
+		}
+		lines[i] = prefix + " " + rewritten
+		rewrote = true
+	}
+	if !rewrote {
+		return body
+	}
+	return strings.Join(lines, "\n")
+}
+
+func rewriteArchiveJSONLinesModelFields(body string, archiveModelName string) string {
+	lines := strings.Split(body, "\n")
+	rewrote := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || (!strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[")) {
+			continue
+		}
+		rewritten := rewriteArchiveBodyModelFields(trimmed, archiveModelName)
+		if rewritten == trimmed {
+			continue
+		}
+		leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = leading + rewritten
+		rewrote = true
+	}
+	if !rewrote {
+		return body
+	}
+	return strings.Join(lines, "\n")
 }
 
 func slimSessionRequestHeaders(headers map[string]string) map[string]string {
