@@ -69,7 +69,7 @@ func runSessionArchiveDailySummaryOnce(now time.Time) {
 
 	targetDay := now.AddDate(0, 0, -1)
 	if err := writeSessionArchiveDailySummary(targetDay, now); err != nil {
-		logger.LogWarn(context.Background(), "session archive summary task failed: %v", err)
+		logger.LogWarn(context.Background(), fmt.Sprintf("session archive summary task failed: %v", err))
 	}
 }
 
