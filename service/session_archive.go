@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	sessionArchiveSchemaVersion = 1
-	sessionArchiveRecordType    = "session_turn"
-	sessionArchiveSubDir        = "session-jsonl"
+	sessionArchiveRecordType = "session_turn"
+	sessionArchiveSubDir     = "session-jsonl"
 )
 
 var sessionArchiveWriteMu sync.Mutex
@@ -30,11 +29,11 @@ var sessionArchiveWriteMu sync.Mutex
 type SessionArchiveCapture struct {
 	mu sync.Mutex
 
-	startedAt        time.Time
+	startedAt time.Time
+
 	requestModelName string
 	requestBody      string
 	requestObject    any
-	requestType      string
 
 	httpResponse bytes.Buffer
 	wsMessages   []SessionArchiveWSMessage
@@ -73,58 +72,45 @@ type SessionArchiveStreamStatus struct {
 }
 
 type SessionArchiveRecord struct {
-	SchemaVersion int    `json:"schema_version"`
-	RecordType    string `json:"record_type"`
+	RecordType       string                     `json:"record_type,omitempty"`
+	RequestMethod    string                     `json:"request_method,omitempty"`
+	IsStream         bool                       `json:"is_stream"`
+	OriginModelName  string                     `json:"origin_model_name,omitempty"`
+	UpstreamModel    string                     `json:"upstream_model,omitempty"`
+	RequestObject    any                        `json:"request_object,omitempty"`
+	RequestBody      string                     `json:"request_body,omitempty"`
+	ResponseBody     string                     `json:"response_body,omitempty"`
+	ResponseText     string                     `json:"response_text,omitempty"`
+	RequestHeaders   map[string]string          `json:"request_headers,omitempty"`
+	ResponseUsage    *SessionArchiveUsageRecord `json:"response_usage,omitempty"`
+	PromptTokens     int                        `json:"prompt_tokens,omitempty"`
+	CompletionTokens int                        `json:"completion_tokens,omitempty"`
+	TotalTokens      int                        `json:"total_tokens,omitempty"`
+}
 
-	SessionID       string `json:"session_id"`
-	SessionIDSource string `json:"session_id_source,omitempty"`
-	RequestID       string `json:"request_id,omitempty"`
-	TurnComplete    bool   `json:"turn_complete"`
-	StartedAt       int64  `json:"started_at,omitempty"`
-	FinishedAt      int64  `json:"finished_at,omitempty"`
+type sessionArchiveRawRecord struct {
+	RecordType         string                     `json:"record_type,omitempty"`
+	RequestMethod      string                     `json:"request_method,omitempty"`
+	IsStream           bool                       `json:"is_stream"`
+	OriginModelName    string                     `json:"origin_model_name,omitempty"`
+	UpstreamModel      string                     `json:"upstream_model,omitempty"`
+	RequestObject      any                        `json:"request_object,omitempty"`
+	RequestBody        string                     `json:"request_body,omitempty"`
+	ResponseBody       string                     `json:"response_body,omitempty"`
+	ResponseText       string                     `json:"response_text,omitempty"`
+	RequestHeaders     map[string]string          `json:"request_headers,omitempty"`
+	ResponseUsage      *SessionArchiveUsageRecord `json:"response_usage,omitempty"`
+	TurnComplete       bool                       `json:"turn_complete"`
+	ResponseHTTPStatus int                        `json:"response_http_status,omitempty"`
+	PromptTokens       int                        `json:"prompt_tokens,omitempty"`
+	CompletionTokens   int                        `json:"completion_tokens,omitempty"`
+	TotalTokens        int                        `json:"total_tokens,omitempty"`
+}
 
-	RelayFormat             types.RelayFormat   `json:"relay_format,omitempty"`
-	RelayMode               int                 `json:"relay_mode,omitempty"`
-	RequestType             string              `json:"request_type,omitempty"`
-	RequestPath             string              `json:"request_path,omitempty"`
-	RequestMethod           string              `json:"request_method,omitempty"`
-	RequestConversionChain  []types.RelayFormat `json:"request_conversion_chain,omitempty"`
-	FinalRequestRelayFormat types.RelayFormat   `json:"final_request_relay_format,omitempty"`
-	IsStream                bool                `json:"is_stream"`
-	IsPlayground            bool                `json:"is_playground"`
-	IsChannelTest           bool                `json:"is_channel_test"`
-
-	UserID     int    `json:"user_id,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Group      string `json:"group,omitempty"`
-	UsingGroup string `json:"using_group,omitempty"`
-	TokenID    int    `json:"token_id,omitempty"`
-	TokenGroup string `json:"token_group,omitempty"`
-
-	ChannelID       int    `json:"channel_id,omitempty"`
-	ChannelType     int    `json:"channel_type,omitempty"`
-	ChannelName     string `json:"channel_name,omitempty"`
-	OriginModelName string `json:"origin_model_name,omitempty"`
-	UpstreamModel   string `json:"upstream_model,omitempty"`
-
-	RequestHeaders    map[string]string       `json:"request_headers,omitempty"`
-	RequestBody       string                  `json:"request_body,omitempty"`
-	RequestObject     any                     `json:"request_object,omitempty"`
-	PromptCacheKey    string                  `json:"prompt_cache_key,omitempty"`
-	PreviousResponseID string                 `json:"previous_response_id,omitempty"`
-	ToolDefinitions  []SessionToolDefinition `json:"tool_definitions,omitempty"`
-	ResponseHTTPStatus int                    `json:"response_http_status,omitempty"`
-	ResponseID         string                 `json:"response_id,omitempty"`
-	ResponseBody       string                 `json:"response_body,omitempty"`
-	ResponseText       string                 `json:"response_text,omitempty"`
-	ResponseUsage      *dto.Usage             `json:"response_usage,omitempty"`
-	ResponseToolCalls  []SessionToolCall      `json:"response_tool_calls,omitempty"`
-	ResponseWSMessages []SessionArchiveWSMessage `json:"response_ws_messages,omitempty"`
-	ResponseError      string                    `json:"response_error,omitempty"`
-	ResponseErrorType  string                    `json:"response_error_type,omitempty"`
-	ResponseErrorCode  string                    `json:"response_error_code,omitempty"`
-	ResponseStatusCode int                       `json:"response_status_code,omitempty"`
-	StreamStatus      *SessionArchiveStreamStatus `json:"stream_status,omitempty"`
+type SessionArchiveUsageRecord struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
 }
 
 type sessionArchiveResponseWriter struct {
@@ -137,7 +123,7 @@ func (w *sessionArchiveResponseWriter) Write(data []byte) (int, error) {
 		return 0, fmt.Errorf("session archive response writer is nil")
 	}
 	n, err := w.ResponseWriter.Write(data)
-	if w != nil && w.capture != nil && n > 0 {
+	if n > 0 && w.capture != nil {
 		w.capture.appendHTTPResponse(data[:n])
 	}
 	return n, err
@@ -151,13 +137,13 @@ func (w *sessionArchiveResponseWriter) WriteString(s string) (int, error) {
 		WriteString(string) (int, error)
 	}); ok {
 		n, err := stringWriter.WriteString(s)
-		if w != nil && w.capture != nil && n > 0 {
+		if n > 0 && w.capture != nil {
 			w.capture.appendHTTPResponse([]byte(s[:n]))
 		}
 		return n, err
 	}
 	n, err := w.ResponseWriter.Write([]byte(s))
-	if w != nil && w.capture != nil && n > 0 {
+	if n > 0 && w.capture != nil {
 		w.capture.appendHTTPResponse([]byte(s[:n]))
 	}
 	return n, err
@@ -182,11 +168,10 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 		startedAt = time.Now()
 	}
 	capture := &SessionArchiveCapture{
-		startedAt:       startedAt,
+		startedAt:        startedAt,
 		requestModelName: requestModelName,
 		requestBody:      rawRequestBody,
 		requestObject:    cloneJSONValue(request),
-		requestType:      fmt.Sprintf("%T", request),
 	}
 	common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, capture)
 	c.Writer = &sessionArchiveResponseWriter{
@@ -216,65 +201,38 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 		return
 	}
 
-	responseBody, wsMessages := capture.snapshotResponse()
-	sessionID, sessionIDSource := resolveSessionID(c, info, request, capture.requestBody)
-	promptCacheKey, previousResponseID := sessionLinkFields(request, capture.requestBody)
-	record := &SessionArchiveRecord{
-		SchemaVersion:          sessionArchiveSchemaVersion,
-		RecordType:             sessionArchiveRecordType,
-		SessionID:              sessionID,
-		SessionIDSource:        sessionIDSource,
-		RequestID:              info.RequestId,
-		TurnComplete:           newAPIError == nil,
-		StartedAt:              capture.startedAt.Unix(),
-		FinishedAt:             time.Now().Unix(),
-		RelayFormat:            info.RelayFormat,
-		RelayMode:              info.RelayMode,
-		RequestType:            capture.requestType,
-		RequestPath:            info.RequestURLPath,
-		RequestMethod:          c.Request.Method,
-		RequestConversionChain: cloneRelayFormats(info.RequestConversionChain),
-		FinalRequestRelayFormat: info.GetFinalRequestRelayFormat(),
-		IsStream:               info.IsStream,
-		IsPlayground:           info.IsPlayground,
-		IsChannelTest:          info.IsChannelTest,
-		UserID:                 info.UserId,
-		Username:               c.GetString("username"),
-		Group:                  info.UserGroup,
-		UsingGroup:             info.UsingGroup,
-		TokenID:                info.TokenId,
-		TokenGroup:             info.TokenGroup,
-		ChannelID:              common.GetContextKeyInt(c, constant.ContextKeyChannelId),
-		ChannelType:            common.GetContextKeyInt(c, constant.ContextKeyChannelType),
-		ChannelName:            common.GetContextKeyString(c, constant.ContextKeyChannelName),
-		OriginModelName:        capture.requestModelName,
-		UpstreamModel:          info.UpstreamModelName,
-		RequestHeaders:         sanitizeSessionHeaders(info.RequestHeaders),
-		RequestBody:            capture.requestBody,
-		RequestObject:          capture.requestObject,
-		PromptCacheKey:         promptCacheKey,
-		PreviousResponseID:     previousResponseID,
-		ToolDefinitions:        extractToolDefinitions(request),
-		ResponseHTTPStatus:     c.Writer.Status(),
-		ResponseID:             extractResponseID(responseBody),
-		ResponseBody:           responseBody,
-		ResponseText:           extractResponseText(responseBody),
-		ResponseUsage:          extractResponseUsage(responseBody),
-		ResponseToolCalls:      extractResponseToolCalls(responseBody),
-		ResponseWSMessages:     wsMessages,
-		StreamStatus:           streamStatusSnapshot(info.StreamStatus),
+	responseBody := capture.snapshotResponse()
+	responseUsage := slimSessionArchiveUsage(extractResponseUsage(responseBody))
+	responseHTTPStatus := c.Writer.Status()
+	if responseHTTPStatus == 0 && newAPIError != nil {
+		responseHTTPStatus = newAPIError.StatusCode
 	}
-	if newAPIError != nil {
-		record.ResponseError = newAPIError.ErrorWithStatusCode()
-		record.ResponseErrorType = string(newAPIError.GetErrorType())
-		record.ResponseErrorCode = string(newAPIError.GetErrorCode())
-		record.ResponseStatusCode = newAPIError.StatusCode
-		if record.ResponseHTTPStatus == 0 {
-			record.ResponseHTTPStatus = newAPIError.StatusCode
-		}
+	rawRecord := &sessionArchiveRawRecord{
+		RecordType:         sessionArchiveRecordType,
+		RequestMethod:      c.Request.Method,
+		IsStream:           info.IsStream,
+		OriginModelName:    capture.requestModelName,
+		UpstreamModel:      info.UpstreamModelName,
+		RequestObject:      cloneJSONValue(capture.requestObject),
+		RequestBody:        capture.requestBody,
+		ResponseBody:       responseBody,
+		ResponseText:       extractResponseText(responseBody),
+		RequestHeaders:     cloneStringMap(info.RequestHeaders),
+		ResponseUsage:      responseUsage,
+		TurnComplete:       newAPIError == nil,
+		ResponseHTTPStatus: responseHTTPStatus,
 	}
-
-	if err := appendSessionArchiveRecord(record); err != nil {
+	if responseUsage != nil {
+		rawRecord.PromptTokens = responseUsage.PromptTokens
+		rawRecord.CompletionTokens = responseUsage.CompletionTokens
+		rawRecord.TotalTokens = responseUsage.TotalTokens
+	}
+	if !shouldKeepSessionArchiveRecord(rawRecord) {
+		common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, nil)
+		return
+	}
+	record := buildCleanSessionArchiveRecord(rawRecord)
+	if err := appendSessionArchiveRecord(record, capture.requestModelName, capture.startedAt); err != nil {
 		common.SysError("failed to write session archive: " + err.Error())
 	}
 	common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, nil)
@@ -302,15 +260,30 @@ func (c *SessionArchiveCapture) appendWSMessage(kind string, payload string) {
 	})
 }
 
-func (c *SessionArchiveCapture) snapshotResponse() (string, []SessionArchiveWSMessage) {
+func (c *SessionArchiveCapture) snapshotResponse() string {
 	if c == nil {
-		return "", nil
+		return ""
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	messages := make([]SessionArchiveWSMessage, len(c.wsMessages))
-	copy(messages, c.wsMessages)
-	return c.httpResponse.String(), messages
+	body := c.httpResponse.String()
+	if len(c.wsMessages) == 0 {
+		return body
+	}
+	var builder strings.Builder
+	if body != "" {
+		builder.WriteString(body)
+		if !strings.HasSuffix(body, "\n") {
+			builder.WriteByte('\n')
+		}
+	}
+	for index, message := range c.wsMessages {
+		if index > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(message.Payload)
+	}
+	return builder.String()
 }
 
 func getSessionArchiveCapture(c *gin.Context) *SessionArchiveCapture {
@@ -374,7 +347,7 @@ func sessionArchiveShouldCaptureModel(modelName string) bool {
 	return false
 }
 
-func appendSessionArchiveRecord(record *SessionArchiveRecord) error {
+func appendSessionArchiveRecord(record *SessionArchiveRecord, modelName string, startedAt time.Time) error {
 	if record == nil {
 		return nil
 	}
@@ -382,7 +355,7 @@ func appendSessionArchiveRecord(record *SessionArchiveRecord) error {
 	if err != nil {
 		return err
 	}
-	path := sessionArchiveFilePath(record.OriginModelName, time.Unix(record.StartedAt, 0))
+	path := sessionArchiveFilePath(modelName, startedAt)
 	sessionArchiveWriteMu.Lock()
 	defer sessionArchiveWriteMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -399,19 +372,146 @@ func appendSessionArchiveRecord(record *SessionArchiveRecord) error {
 	return nil
 }
 
-func sessionArchiveFilePath(modelName string, t time.Time) string {
-	dir := strings.TrimSpace(common.SessionArchiveDir)
-	if dir == "" {
-		logDir := "./logs"
-		if common.LogDir != nil && strings.TrimSpace(*common.LogDir) != "" {
-			logDir = *common.LogDir
-		}
-		dir = filepath.Join(logDir, sessionArchiveSubDir)
+func shouldKeepSessionArchiveRecord(record *sessionArchiveRawRecord) bool {
+	if record == nil {
+		return false
 	}
+	userAgent := strings.ToLower(strings.TrimSpace(sessionArchiveUserAgent(record.RequestHeaders)))
+	if strings.HasPrefix(userAgent, "check-cx") {
+		return false
+	}
+	return record.TurnComplete && record.ResponseHTTPStatus == 200
+}
+
+func buildCleanSessionArchiveRecord(record *sessionArchiveRawRecord) *SessionArchiveRecord {
+	if record == nil {
+		return nil
+	}
+	cleaned := &SessionArchiveRecord{
+		RecordType:      record.RecordType,
+		RequestMethod:   record.RequestMethod,
+		IsStream:        record.IsStream,
+		OriginModelName: record.OriginModelName,
+		UpstreamModel:   record.UpstreamModel,
+		RequestObject:   cloneJSONValue(record.RequestObject),
+		RequestBody:     record.RequestBody,
+		ResponseBody:    record.ResponseBody,
+		ResponseText:    record.ResponseText,
+		RequestHeaders:  slimSessionRequestHeaders(record.RequestHeaders),
+		ResponseUsage:   slimSessionArchiveUsage(record.ResponseUsage),
+	}
+	if cleaned.RequestObject != nil && cleaned.RequestBody != "" {
+		cleaned.RequestBody = ""
+	}
+	if requestObject, ok := mapFromAny(cleaned.RequestObject); ok {
+		if _, exists := requestObject["system"]; exists {
+			delete(requestObject, "system")
+			cleaned.RequestObject = requestObject
+		}
+	}
+	if record.PromptTokens != 0 {
+		cleaned.PromptTokens = record.PromptTokens
+	}
+	if record.CompletionTokens != 0 {
+		cleaned.CompletionTokens = record.CompletionTokens
+	}
+	if record.TotalTokens != 0 {
+		cleaned.TotalTokens = record.TotalTokens
+	}
+	return cleaned
+}
+
+func slimSessionRequestHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), "user-agent") {
+			return map[string]string{"User-Agent": value}
+		}
+	}
+	return nil
+}
+
+func sessionArchiveUserAgent(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), "user-agent") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func slimSessionArchiveUsage(usage any) *SessionArchiveUsageRecord {
+	switch typed := usage.(type) {
+	case nil:
+		return nil
+	case *SessionArchiveUsageRecord:
+		if typed == nil || (typed.PromptTokens == 0 && typed.CompletionTokens == 0 && typed.TotalTokens == 0) {
+			return nil
+		}
+		return &SessionArchiveUsageRecord{
+			PromptTokens:     typed.PromptTokens,
+			CompletionTokens: typed.CompletionTokens,
+			TotalTokens:      typed.TotalTokens,
+		}
+	case *dto.Usage:
+		if typed == nil || (typed.PromptTokens == 0 && typed.CompletionTokens == 0 && typed.TotalTokens == 0) {
+			return nil
+		}
+		return &SessionArchiveUsageRecord{
+			PromptTokens:     typed.PromptTokens,
+			CompletionTokens: typed.CompletionTokens,
+			TotalTokens:      typed.TotalTokens,
+		}
+	default:
+		usageMap, ok := mapFromAny(typed)
+		if !ok {
+			return nil
+		}
+		slimmed := &SessionArchiveUsageRecord{
+			PromptTokens:     intFromAny(usageMap["prompt_tokens"]),
+			CompletionTokens: intFromAny(usageMap["completion_tokens"]),
+			TotalTokens:      intFromAny(usageMap["total_tokens"]),
+		}
+		if slimmed.PromptTokens == 0 && slimmed.CompletionTokens == 0 && slimmed.TotalTokens == 0 {
+			return nil
+		}
+		return slimmed
+	}
+}
+
+func cloneStringMap(value map[string]string) map[string]string {
+	if len(value) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func sessionArchiveFilePath(modelName string, t time.Time) string {
 	if t.IsZero() {
 		t = time.Now()
 	}
-	return filepath.Join(dir, sessionArchiveModelDir(modelName), fmt.Sprintf("session-%s.jsonl", t.Format("20060102")))
+	return filepath.Join(sessionArchiveRootDir(), sessionArchiveModelDir(modelName), fmt.Sprintf("session-%s.jsonl", t.Format("20060102")))
+}
+
+func sessionArchiveRootDir() string {
+	dir := strings.TrimSpace(common.SessionArchiveDir)
+	if dir != "" {
+		return dir
+	}
+	logDir := "./logs"
+	if common.LogDir != nil && strings.TrimSpace(*common.LogDir) != "" {
+		logDir = *common.LogDir
+	}
+	return filepath.Join(logDir, sessionArchiveSubDir)
 }
 
 func sessionArchiveModelDir(modelName string) string {
@@ -810,6 +910,22 @@ func responseJSONFragments(body string) []string {
 				continue
 			}
 			fragments = append(fragments, payload)
+		}
+		if len(fragments) > 0 {
+			return fragments
+		}
+	}
+	if strings.Contains(trimmed, "\n") {
+		lines := strings.Split(trimmed, "\n")
+		fragments := make([]string, 0, len(lines))
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(line, "{") || strings.HasPrefix(line, "[") {
+				fragments = append(fragments, line)
+			}
 		}
 		if len(fragments) > 0 {
 			return fragments

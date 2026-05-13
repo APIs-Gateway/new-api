@@ -24,14 +24,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
-import { getModels } from '@/features/models/api'
+import { getPricing } from '@/features/pricing/api'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 
 const SESSION_ARCHIVE_ENABLED_MODELS_KEY =
   'session_archive_setting.enabled_models'
-
-const MODEL_LIST_PAGE_SIZE = 100
 
 type SessionArchiveSettingsCardProps = {
   defaultValues: {
@@ -76,37 +74,19 @@ function parseModelNames(raw: string) {
 }
 
 async function fetchAllModelNames() {
-  const modelNames: string[] = []
-  let page = 1
-
-  for (;;) {
-    const response = await getModels({
-      p: page,
-      page_size: MODEL_LIST_PAGE_SIZE,
-    })
-
-    if (!response.success || !response.data) {
-      throw new Error(response.message || 'Failed to load')
-    }
-
-    const batch =
-      response.data.items?.reduce<string[]>((acc, item) => {
-        if (item.model_name) {
-          acc.push(item.model_name)
-        }
-        return acc
-      }, []) ?? []
-    modelNames.push(...batch)
-
-    const total = response.data.total ?? modelNames.length
-    if (modelNames.length >= total || batch.length < MODEL_LIST_PAGE_SIZE) {
-      break
-    }
-
-    page += 1
+  const response = await getPricing()
+  if (!response.success || !Array.isArray(response.data)) {
+    throw new Error(response.message || 'Failed to load')
   }
 
-  return normalizeModelNames(modelNames)
+  return normalizeModelNames(
+    response.data.reduce<string[]>((acc, item) => {
+      if (item.model_name) {
+        acc.push(item.model_name)
+      }
+      return acc
+    }, [])
+  )
 }
 
 export function SessionArchiveSettingsCard({
