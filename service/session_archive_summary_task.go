@@ -143,12 +143,12 @@ func accumulateSessionArchiveSummaryFromFile(path string, fallbackModelName stri
 		if line == "" {
 			continue
 		}
-		var record SessionArchiveRecord
+		var record sessionArchiveSummaryRecord
 		if err := common.Unmarshal([]byte(line), &record); err != nil {
 			common.SysError(fmt.Sprintf("failed to parse session archive record for summary: %s, path=%s", err.Error(), path))
 			continue
 		}
-		modelName := firstNonEmpty(record.OriginModelName, fallbackModelName)
+		modelName := strings.TrimSpace(fallbackModelName)
 		if modelName == "" {
 			modelName = "unknown-model"
 		}
@@ -166,19 +166,29 @@ func accumulateSessionArchiveSummaryFromFile(path string, fallbackModelName stri
 	return scanner.Err()
 }
 
-func sessionArchiveSummaryTokens(record *SessionArchiveRecord) (int, int, int) {
+type sessionArchiveSummaryRecord struct {
+	OriginModelName  string                     `json:"origin_model_name,omitempty"`
+	ResponseUsage    *SessionArchiveUsageRecord `json:"response_usage,omitempty"`
+	InputTokens      int                        `json:"input_tokens,omitempty"`
+	OutputTokens     int                        `json:"output_tokens,omitempty"`
+	PromptTokens     int                        `json:"prompt_tokens,omitempty"`
+	CompletionTokens int                        `json:"completion_tokens,omitempty"`
+	TotalTokens      int                        `json:"total_tokens,omitempty"`
+}
+
+func sessionArchiveSummaryTokens(record *sessionArchiveSummaryRecord) (int, int, int) {
 	if record == nil {
 		return 0, 0, 0
 	}
-	inputTokens := record.PromptTokens
-	outputTokens := record.CompletionTokens
+	inputTokens := firstNonZero(record.InputTokens, record.PromptTokens)
+	outputTokens := firstNonZero(record.OutputTokens, record.CompletionTokens)
 	totalTokens := record.TotalTokens
 	if record.ResponseUsage != nil {
 		if inputTokens == 0 {
-			inputTokens = record.ResponseUsage.PromptTokens
+			inputTokens = record.ResponseUsage.InputTokens
 		}
 		if outputTokens == 0 {
-			outputTokens = record.ResponseUsage.CompletionTokens
+			outputTokens = record.ResponseUsage.OutputTokens
 		}
 		if totalTokens == 0 {
 			totalTokens = record.ResponseUsage.TotalTokens
@@ -188,6 +198,15 @@ func sessionArchiveSummaryTokens(record *SessionArchiveRecord) (int, int, int) {
 		totalTokens = inputTokens + outputTokens
 	}
 	return inputTokens, outputTokens, totalTokens
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func sessionArchiveSummaryFilePath(targetDay time.Time) string {

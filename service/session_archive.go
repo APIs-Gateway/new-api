@@ -2,6 +2,8 @@ package service
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -35,6 +37,8 @@ type SessionArchiveCapture struct {
 	archiveModelName string
 	requestBody      string
 	requestObject    any
+	sessionKey       string
+	sessionKeySeed   string
 
 	httpResponse bytes.Buffer
 	wsMessages   []SessionArchiveWSMessage
@@ -73,20 +77,22 @@ type SessionArchiveStreamStatus struct {
 }
 
 type SessionArchiveRecord struct {
-	RecordType       string                     `json:"record_type,omitempty"`
-	RequestMethod    string                     `json:"request_method,omitempty"`
-	IsStream         bool                       `json:"is_stream"`
-	OriginModelName  string                     `json:"origin_model_name,omitempty"`
-	UpstreamModel    string                     `json:"upstream_model,omitempty"`
-	RequestObject    any                        `json:"request_object,omitempty"`
-	RequestBody      string                     `json:"request_body,omitempty"`
-	ResponseBody     string                     `json:"response_body,omitempty"`
-	ResponseText     string                     `json:"response_text,omitempty"`
-	RequestHeaders   map[string]string          `json:"request_headers,omitempty"`
-	ResponseUsage    *SessionArchiveUsageRecord `json:"response_usage,omitempty"`
-	PromptTokens     int                        `json:"prompt_tokens,omitempty"`
-	CompletionTokens int                        `json:"completion_tokens,omitempty"`
-	TotalTokens      int                        `json:"total_tokens,omitempty"`
+	RecordType    string                     `json:"record_type"`
+	SessionID     string                     `json:"session_id"`
+	UserAgent     string                     `json:"user_agent"`
+	ResponseUsage *SessionArchiveUsageRecord `json:"response_usage"`
+	RequestObject any                        `json:"request_object"`
+
+	SessionKey      string            `json:"-"`
+	RequestMethod   string            `json:"-"`
+	IsStream        bool              `json:"-"`
+	OriginModelName string            `json:"-"`
+	UpstreamModel   string            `json:"-"`
+	RequestBody     string            `json:"-"`
+	ResponseBody    string            `json:"-"`
+	ResponseText    string            `json:"-"`
+	RequestHeaders  map[string]string `json:"-"`
+	sessionKeySeed  string
 }
 
 type sessionArchiveRawRecord struct {
@@ -100,8 +106,10 @@ type sessionArchiveRawRecord struct {
 	ResponseBody       string                     `json:"response_body,omitempty"`
 	ResponseText       string                     `json:"response_text,omitempty"`
 	RequestHeaders     map[string]string          `json:"request_headers,omitempty"`
+	UserAgent          string                     `json:"user_agent,omitempty"`
 	ResponseUsage      *SessionArchiveUsageRecord `json:"response_usage,omitempty"`
 	TurnComplete       bool                       `json:"turn_complete"`
+	StreamComplete     bool                       `json:"stream_complete"`
 	ResponseHTTPStatus int                        `json:"response_http_status,omitempty"`
 	PromptTokens       int                        `json:"prompt_tokens,omitempty"`
 	CompletionTokens   int                        `json:"completion_tokens,omitempty"`
@@ -109,9 +117,30 @@ type sessionArchiveRawRecord struct {
 }
 
 type SessionArchiveUsageRecord struct {
-	PromptTokens     int `json:"prompt_tokens,omitempty"`
-	CompletionTokens int `json:"completion_tokens,omitempty"`
-	TotalTokens      int `json:"total_tokens,omitempty"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+func (usage *SessionArchiveUsageRecord) UnmarshalJSON(data []byte) error {
+	type usageJSON struct {
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	}
+	var decoded usageJSON
+	if err := common.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	usage.InputTokens = firstNonZero(decoded.InputTokens, decoded.PromptTokens)
+	usage.OutputTokens = firstNonZero(decoded.OutputTokens, decoded.CompletionTokens)
+	usage.TotalTokens = decoded.TotalTokens
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+	return nil
 }
 
 type sessionArchiveResponseWriter struct {
@@ -165,6 +194,7 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 		return nil
 	}
 	archiveModelName := sessionArchiveModelAlias(requestModelName)
+	sessionID, _ := resolveSessionID(c, info, request, rawRequestBody)
 	startedAt := info.StartTime
 	if startedAt.IsZero() {
 		startedAt = time.Now()
@@ -175,6 +205,8 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 		archiveModelName: archiveModelName,
 		requestBody:      rawRequestBody,
 		requestObject:    cloneJSONValue(request),
+		sessionKey:       explicitSessionArchiveKey(info, sessionID),
+		sessionKeySeed:   sessionArchiveKeySeed(info),
 	}
 	common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, capture)
 	c.Writer = &sessionArchiveResponseWriter{
@@ -210,6 +242,7 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 	if responseHTTPStatus == 0 && newAPIError != nil {
 		responseHTTPStatus = newAPIError.StatusCode
 	}
+	responseText := extractResponseText(responseBody)
 	rawRecord := &sessionArchiveRawRecord{
 		RecordType:         sessionArchiveRecordType,
 		RequestMethod:      c.Request.Method,
@@ -219,22 +252,39 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 		RequestObject:      cloneJSONValue(capture.requestObject),
 		RequestBody:        capture.requestBody,
 		ResponseBody:       responseBody,
-		ResponseText:       extractResponseText(responseBody),
+		ResponseText:       responseText,
 		RequestHeaders:     cloneStringMap(info.RequestHeaders),
+		UserAgent:          rawSessionArchiveUserAgent(info.RequestHeaders),
 		ResponseUsage:      responseUsage,
 		TurnComplete:       newAPIError == nil,
+		StreamComplete:     sessionArchiveStreamComplete(info),
 		ResponseHTTPStatus: responseHTTPStatus,
 	}
 	if responseUsage != nil {
-		rawRecord.PromptTokens = responseUsage.PromptTokens
-		rawRecord.CompletionTokens = responseUsage.CompletionTokens
+		rawRecord.PromptTokens = responseUsage.InputTokens
+		rawRecord.CompletionTokens = responseUsage.OutputTokens
 		rawRecord.TotalTokens = responseUsage.TotalTokens
 	}
 	if !shouldKeepSessionArchiveRecord(rawRecord) {
 		common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, nil)
 		return
 	}
-	record := buildCleanSessionArchiveRecord(rawRecord)
+	record := &SessionArchiveRecord{
+		RecordType:      rawRecord.RecordType,
+		RequestMethod:   rawRecord.RequestMethod,
+		IsStream:        rawRecord.IsStream,
+		OriginModelName: rawRecord.OriginModelName,
+		UpstreamModel:   rawRecord.UpstreamModel,
+		RequestObject:   rawRecord.RequestObject,
+		RequestBody:     rawRecord.RequestBody,
+		ResponseBody:    rawRecord.ResponseBody,
+		ResponseText:    rawRecord.ResponseText,
+		RequestHeaders:  rawRecord.RequestHeaders,
+		UserAgent:       rawRecord.UserAgent,
+		ResponseUsage:   rawRecord.ResponseUsage,
+		SessionKey:      capture.sessionKey,
+		sessionKeySeed:  capture.sessionKeySeed,
+	}
 	if err := appendSessionArchiveRecord(record, capture.archiveModelName, capture.startedAt); err != nil {
 		common.SysError("failed to write session archive: " + err.Error())
 	}
@@ -377,9 +427,13 @@ func appendSessionArchiveRecord(record *SessionArchiveRecord, modelName string, 
 	if record == nil {
 		return nil
 	}
-	line, err := common.Marshal(record)
-	if err != nil {
-		return err
+	sessionKey := firstNonEmpty(record.SessionID, record.SessionKey, explicitSessionArchiveKeyFromRecord(record))
+	record = normalizeCleanSessionArchiveRecord(record, modelName)
+	if record.SessionKey == "" {
+		record.SessionKey = sessionKey
+	}
+	if !sessionArchiveRecordHasUsableContext(record) || !sessionArchiveRecordHasAssistantOutput(record) || strings.TrimSpace(record.UserAgent) == "" {
+		return nil
 	}
 	path := sessionArchiveFilePath(modelName, startedAt)
 	sessionArchiveWriteMu.Lock()
@@ -387,64 +441,1033 @@ func appendSessionArchiveRecord(record *SessionArchiveRecord, modelName string, 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+
+	lines, err := readSessionArchiveLines(path)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	if _, err := file.Write(append(line, '\n')); err != nil {
+	if strings.TrimSpace(record.SessionKey) == "" {
+		record.SessionKey = resolveSessionArchiveRecordKey(record, lines)
+	}
+	record.SessionID = record.SessionKey
+	line, err := common.Marshal(record)
+	if err != nil {
 		return err
 	}
-	return nil
+	return writeSessionArchiveLines(path, upsertSessionArchiveLine(lines, record, string(line)))
+}
+
+func readSessionArchiveLines(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	rawLines := strings.Split(string(data), "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+func writeSessionArchiveLines(path string, lines []string) error {
+	var builder strings.Builder
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		builder.WriteString(line)
+		builder.WriteByte('\n')
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(builder.String()), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func upsertSessionArchiveLine(lines []string, record *SessionArchiveRecord, line string) []string {
+	sessionKey := ""
+	if record != nil {
+		sessionKey = strings.TrimSpace(firstNonEmpty(record.SessionID, record.SessionKey))
+	}
+	if sessionKey == "" {
+		return append(lines, line)
+	}
+	for index, existingLine := range lines {
+		var existing SessionArchiveRecord
+		if err := common.Unmarshal([]byte(existingLine), &existing); err != nil {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmpty(existing.SessionID, existing.SessionKey)) == sessionKey {
+			lines[index] = line
+			return lines
+		}
+	}
+	if record != nil {
+		newMessages := sessionArchiveRecordMessages(record)
+		for index, existingLine := range lines {
+			var existing SessionArchiveRecord
+			if err := common.Unmarshal([]byte(existingLine), &existing); err != nil {
+				continue
+			}
+			normalizedExisting := normalizeCleanSessionArchiveRecord(&existing, firstNonEmpty(record.OriginModelName, record.UpstreamModel))
+			existingMessages := sessionArchiveRecordMessages(normalizedExisting)
+			if len(existingMessages) > 0 && sessionArchiveMessagesPrefixEqual(existingMessages, newMessages) {
+				lines[index] = line
+				return lines
+			}
+		}
+	}
+	return append(lines, line)
+}
+
+func resolveSessionArchiveRecordKey(record *SessionArchiveRecord, existingLines []string) string {
+	if record == nil {
+		return ""
+	}
+	if explicit := explicitSessionArchiveKeyFromRecord(record); explicit != "" {
+		return explicit
+	}
+	if matched := matchExistingSessionArchiveKey(record, existingLines); matched != "" {
+		return matched
+	}
+	return fallbackSessionArchiveKey(record)
+}
+
+func explicitSessionArchiveKey(info *relaycommon.RelayInfo, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || isRequestIDSessionArchiveKey(info, sessionID) {
+		return ""
+	}
+	return "sid_" + shortSHA256(sessionID)
+}
+
+func explicitSessionArchiveKeyFromRecord(record *SessionArchiveRecord) string {
+	if record == nil {
+		return ""
+	}
+	if key := sessionKeyFromRequestObject(record.RequestObject); key != "" {
+		return key
+	}
+	if strings.TrimSpace(record.RequestBody) == "" {
+		return ""
+	}
+	var body map[string]any
+	if err := common.UnmarshalJsonStr(record.RequestBody, &body); err != nil {
+		return ""
+	}
+	return sessionKeyFromRequestObject(body)
+}
+
+func sessionKeyFromRequestObject(value any) string {
+	requestObject, ok := mapFromAny(value)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"session_id", "sessionId", "conversation_id", "conversationId", "prompt_cache_key"} {
+		if value := stringFromAny(requestObject[key]); value != "" {
+			return "sid_" + shortSHA256(value)
+		}
+	}
+	if metadata, ok := mapFromAny(requestObject["metadata"]); ok {
+		if value := metadataSessionID(metadata); value != "" {
+			return "sid_" + shortSHA256(value)
+		}
+	}
+	if conversation, ok := mapFromAny(requestObject["conversation"]); ok {
+		if value := objectSessionID(conversation); value != "" {
+			return "sid_" + shortSHA256(value)
+		}
+	}
+	if value := stringFromAny(requestObject["conversation"]); value != "" {
+		return "sid_" + shortSHA256(value)
+	}
+	return ""
+}
+
+func matchExistingSessionArchiveKey(record *SessionArchiveRecord, existingLines []string) string {
+	newMessages := sessionArchiveRecordMessages(record)
+	if len(newMessages) == 0 {
+		return ""
+	}
+	for index := len(existingLines) - 1; index >= 0; index-- {
+		var existing SessionArchiveRecord
+		if err := common.Unmarshal([]byte(existingLines[index]), &existing); err != nil {
+			continue
+		}
+		normalizedExisting := normalizeCleanSessionArchiveRecord(&existing, firstNonEmpty(record.OriginModelName, record.UpstreamModel))
+		existingMessages := sessionArchiveRecordMessages(normalizedExisting)
+		if len(existingMessages) == 0 || len(existingMessages) > len(newMessages) {
+			continue
+		}
+		if sessionArchiveMessagesPrefixEqual(existingMessages, newMessages) {
+			if key := strings.TrimSpace(firstNonEmpty(existing.SessionID, existing.SessionKey)); key != "" {
+				return key
+			}
+			return fallbackSessionArchiveKey(normalizedExisting)
+		}
+	}
+	return ""
+}
+
+func fallbackSessionArchiveKey(record *SessionArchiveRecord) string {
+	if record == nil {
+		return "ctx_" + shortSHA256(common.GetTimeString())
+	}
+	seed := strings.TrimSpace(record.sessionKeySeed)
+	if seed == "" {
+		seed = firstNonEmpty(record.OriginModelName, record.UpstreamModel)
+	}
+	messages := sessionArchiveRecordMessages(record)
+	if len(messages) > 0 {
+		messagesJSON, err := common.Marshal(messages)
+		if err == nil {
+			return "ctx_" + shortSHA256(seed+"|"+string(messagesJSON))
+		}
+	}
+	if body := strings.TrimSpace(record.RequestBody); body != "" {
+		return "ctx_" + shortSHA256(seed+"|"+body)
+	}
+	return "ctx_" + shortSHA256(seed+"|"+firstNonEmpty(record.ResponseText, record.UserAgent, common.GetTimeString()))
+}
+
+func sessionArchiveRecordMessages(record *SessionArchiveRecord) []any {
+	if record == nil {
+		return nil
+	}
+	requestObject, ok := mapFromAny(record.RequestObject)
+	if !ok {
+		return nil
+	}
+	messages, ok := sliceFromAny(requestObject["messages"])
+	if !ok {
+		return nil
+	}
+	return messages
+}
+
+func sessionArchiveMessagesPrefixEqual(prefix []any, messages []any) bool {
+	if len(prefix) == 0 || len(prefix) > len(messages) {
+		return false
+	}
+	for index := range prefix {
+		prefixJSON, err := common.Marshal(prefix[index])
+		if err != nil {
+			return false
+		}
+		messageJSON, err := common.Marshal(messages[index])
+		if err != nil {
+			return false
+		}
+		if !bytes.Equal(prefixJSON, messageJSON) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRequestIDSessionArchiveKey(info *relaycommon.RelayInfo, sessionID string) bool {
+	if info == nil {
+		return false
+	}
+	return strings.TrimSpace(sessionID) != "" && strings.TrimSpace(sessionID) == strings.TrimSpace(info.RequestId)
+}
+
+func sessionArchiveKeySeed(info *relaycommon.RelayInfo) string {
+	if info == nil {
+		return ""
+	}
+	return firstNonEmpty(info.OriginModelName, info.UpstreamModelName)
+}
+
+func shortSHA256(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:16])
+}
+
+func sessionArchiveStreamComplete(info *relaycommon.RelayInfo) bool {
+	if info == nil || !info.IsStream {
+		return true
+	}
+	if info.StreamStatus == nil {
+		return true
+	}
+	return info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors()
 }
 
 func shouldKeepSessionArchiveRecord(record *sessionArchiveRawRecord) bool {
 	if record == nil {
 		return false
 	}
-	userAgent := strings.ToLower(strings.TrimSpace(sessionArchiveUserAgent(record.RequestHeaders)))
+	userAgent := strings.ToLower(strings.TrimSpace(sessionArchiveRawFirstNonEmpty(record.UserAgent, rawSessionArchiveUserAgent(record.RequestHeaders))))
+	if userAgent == "" {
+		return false
+	}
 	if strings.HasPrefix(userAgent, "check-cx") {
 		return false
 	}
-	return record.TurnComplete && record.ResponseHTTPStatus == 200
+	if !record.TurnComplete || !record.StreamComplete || record.ResponseHTTPStatus >= 400 {
+		return false
+	}
+	recordWithResponse := buildCleanSessionArchiveRecord(record)
+	return sessionArchiveRecordHasUsableContext(recordWithResponse) && sessionArchiveRecordHasAssistantOutput(recordWithResponse)
 }
 
 func buildCleanSessionArchiveRecord(record *sessionArchiveRawRecord) *SessionArchiveRecord {
 	if record == nil {
 		return nil
 	}
-	cleaned := &SessionArchiveRecord{
+	responseUsage := slimSessionArchiveUsage(record.ResponseUsage)
+	if responseUsage == nil {
+		responseUsage = slimSessionArchiveUsage(&SessionArchiveUsageRecord{
+			InputTokens:  record.PromptTokens,
+			OutputTokens: record.CompletionTokens,
+			TotalTokens:  record.TotalTokens,
+		})
+	}
+	return normalizeCleanSessionArchiveRecord(&SessionArchiveRecord{
 		RecordType:      record.RecordType,
 		RequestMethod:   record.RequestMethod,
 		IsStream:        record.IsStream,
 		OriginModelName: record.OriginModelName,
 		UpstreamModel:   record.UpstreamModel,
-		RequestObject:   rewriteArchiveModelFields(cloneJSONValue(record.RequestObject), record.OriginModelName),
-		RequestBody:     rewriteArchiveBodyModelFields(record.RequestBody, record.OriginModelName),
-		ResponseBody:    rewriteArchiveResponseModelFields(record.ResponseBody, record.OriginModelName),
+		RequestObject:   record.RequestObject,
+		RequestBody:     record.RequestBody,
+		ResponseBody:    record.ResponseBody,
 		ResponseText:    record.ResponseText,
-		RequestHeaders:  slimSessionRequestHeaders(record.RequestHeaders),
-		ResponseUsage:   slimSessionArchiveUsage(record.ResponseUsage),
+		RequestHeaders:  record.RequestHeaders,
+		UserAgent:       sessionArchiveRawFirstNonEmpty(record.UserAgent, rawSessionArchiveUserAgent(record.RequestHeaders)),
+		ResponseUsage:   responseUsage,
+	}, record.OriginModelName)
+}
+
+func normalizeCleanSessionArchiveRecord(record *SessionArchiveRecord, modelName string) *SessionArchiveRecord {
+	if record == nil {
+		return nil
+	}
+	archiveModelName := firstNonEmpty(record.OriginModelName, modelName)
+	upstreamModel := firstNonEmpty(record.UpstreamModel, archiveModelName)
+	requestObject := normalizeSessionArchiveRequestObject(rewriteArchiveModelFields(cloneJSONValue(record.RequestObject), archiveModelName))
+	requestObject = appendSessionArchiveAssistantOutput(requestObject, record.ResponseText, extractResponseToolCalls(record.ResponseBody))
+	requestObject = ensureSessionArchiveToolDefinitions(requestObject)
+	requestObject = filterSessionArchiveOrphanToolResults(requestObject)
+	userAgent := sessionArchiveRawFirstNonEmpty(record.UserAgent, rawSessionArchiveUserAgent(record.RequestHeaders))
+	cleaned := &SessionArchiveRecord{
+		RecordType:      firstNonEmpty(record.RecordType, sessionArchiveRecordType),
+		SessionKey:      strings.TrimSpace(record.SessionKey),
+		SessionID:       firstNonEmpty(record.SessionID, strings.TrimSpace(record.SessionKey)),
+		UserAgent:       userAgent,
+		RequestMethod:   record.RequestMethod,
+		IsStream:        record.IsStream,
+		OriginModelName: archiveModelName,
+		UpstreamModel:   upstreamModel,
+		RequestObject:   requestObject,
+		RequestBody:     rewriteArchiveBodyModelFields(record.RequestBody, archiveModelName),
+		ResponseBody:    rewriteArchiveResponseModelFields(record.ResponseBody, archiveModelName),
+		ResponseText:    record.ResponseText,
+		RequestHeaders:  record.RequestHeaders,
+		ResponseUsage:   record.ResponseUsage,
+	}
+	cleaned.sessionKeySeed = record.sessionKeySeed
+	if cleaned.SessionKey == "" {
+		cleaned.SessionKey = cleaned.SessionID
 	}
 	if cleaned.RequestObject != nil && cleaned.RequestBody != "" {
 		cleaned.RequestBody = ""
 	}
-	if requestObject, ok := mapFromAny(cleaned.RequestObject); ok {
-		if _, exists := requestObject["system"]; exists {
-			delete(requestObject, "system")
-			cleaned.RequestObject = requestObject
+	return cleaned
+}
+
+func (record *SessionArchiveRecord) MarshalJSON() ([]byte, error) {
+	if record == nil {
+		return common.Marshal(nil)
+	}
+	type sessionArchiveRecordJSON struct {
+		RecordType    string                     `json:"record_type"`
+		SessionID     string                     `json:"session_id"`
+		UserAgent     string                     `json:"user_agent"`
+		ResponseUsage *SessionArchiveUsageRecord `json:"response_usage,omitempty"`
+		RequestObject any                        `json:"request_object"`
+	}
+	return common.Marshal(sessionArchiveRecordJSON{
+		RecordType:    record.RecordType,
+		SessionID:     record.SessionID,
+		UserAgent:     record.UserAgent,
+		ResponseUsage: slimSessionArchiveUsage(record.ResponseUsage),
+		RequestObject: record.RequestObject,
+	})
+}
+
+func (record *SessionArchiveRecord) UnmarshalJSON(data []byte) error {
+	type sessionArchiveRecordJSON struct {
+		RecordType    string                     `json:"record_type"`
+		SessionID     string                     `json:"session_id"`
+		SessionKey    string                     `json:"session_key"`
+		UserAgent     string                     `json:"user_agent"`
+		RequestObject any                        `json:"request_object"`
+		ResponseUsage *SessionArchiveUsageRecord `json:"response_usage"`
+		RequestBody   string                     `json:"request_body"`
+		ResponseText  string                     `json:"response_text"`
+	}
+	var decoded sessionArchiveRecordJSON
+	if err := common.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	record.RecordType = decoded.RecordType
+	record.SessionID = decoded.SessionID
+	record.SessionKey = firstNonEmpty(decoded.SessionKey, decoded.SessionID)
+	record.UserAgent = decoded.UserAgent
+	record.RequestObject = decoded.RequestObject
+	record.ResponseUsage = decoded.ResponseUsage
+	record.RequestBody = decoded.RequestBody
+	record.ResponseText = decoded.ResponseText
+	return nil
+}
+
+func normalizeSessionArchiveRequestObject(value any) any {
+	requestObject, ok := mapFromAny(value)
+	if !ok {
+		return map[string]any{"messages": []any{}}
+	}
+	cleaned := make(map[string]any, 2)
+
+	if messages, ok := sliceFromAny(requestObject["messages"]); ok {
+		if normalized := normalizeSessionArchiveMessages(messages); len(normalized) > 0 {
+			cleaned["messages"] = normalized
 		}
 	}
-	if record.PromptTokens != 0 {
-		cleaned.PromptTokens = record.PromptTokens
+	if _, hasMessages := cleaned["messages"]; !hasMessages {
+		if normalized := normalizeSessionArchiveInputMessages(requestObject["input"]); len(normalized) > 0 {
+			cleaned["messages"] = normalized
+		}
 	}
-	if record.CompletionTokens != 0 {
-		cleaned.CompletionTokens = record.CompletionTokens
+	if tools, ok := sliceFromAny(requestObject["tools"]); ok {
+		if normalized := normalizeSessionArchiveTools(tools); len(normalized) > 0 {
+			cleaned["tools"] = normalized
+		}
 	}
-	if record.TotalTokens != 0 {
-		cleaned.TotalTokens = record.TotalTokens
+	if functions, ok := sliceFromAny(requestObject["functions"]); ok {
+		if _, hasTools := cleaned["tools"]; !hasTools {
+			if normalized := normalizeSessionArchiveTools(functions); len(normalized) > 0 {
+				cleaned["tools"] = normalized
+			}
+		}
+	}
+	if _, hasMessages := cleaned["messages"]; !hasMessages {
+		cleaned["messages"] = []any{}
 	}
 	return cleaned
+}
+
+func normalizeSessionArchiveInputMessages(input any) []any {
+	switch value := input.(type) {
+	case nil:
+		return nil
+	case string:
+		if value == "" {
+			return nil
+		}
+		return []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": value},
+			},
+		}}
+	default:
+		items, ok := sliceFromAny(value)
+		if !ok {
+			if text := sessionArchiveToolResultContent(value); text != "" {
+				return []any{map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": text},
+					},
+				}}
+			}
+			return nil
+		}
+		messages := normalizeSessionArchiveMessages(items)
+		if len(messages) > 0 {
+			return messages
+		}
+		var content []any
+		for _, itemAny := range items {
+			if block, ok := normalizeSessionArchiveContentBlock(itemAny); ok {
+				content = append(content, block)
+			}
+		}
+		if len(content) == 0 {
+			return nil
+		}
+		return []any{map[string]any{
+			"role":    "user",
+			"content": content,
+		}}
+	}
+}
+
+func copySessionArchiveRequestField(dst map[string]any, src map[string]any, key string) {
+	copySessionArchiveRequestFieldAs(dst, src, key, key)
+}
+
+func copySessionArchiveRequestFieldAs(dst map[string]any, src map[string]any, srcKey string, dstKey string) {
+	value, exists := src[srcKey]
+	if !exists || value == nil {
+		return
+	}
+	dst[dstKey] = value
+}
+
+func normalizeSessionArchiveMessages(messages []any) []any {
+	if len(messages) == 0 {
+		return nil
+	}
+	normalized := make([]any, 0, len(messages))
+	for _, messageAny := range messages {
+		message, ok := mapFromAny(messageAny)
+		if !ok {
+			continue
+		}
+		role := stringFromAny(message["role"])
+		content := normalizeSessionArchiveContentBlocks(message["content"])
+
+		if toolCalls := normalizeSessionArchiveToolCallBlocks(message["tool_calls"]); len(toolCalls) > 0 {
+			content = append(content, toolCalls...)
+		}
+		if role == "tool" || message["tool_call_id"] != nil || message["tool_use_id"] != nil {
+			block := normalizeSessionArchiveToolResultBlock(message)
+			if block == nil {
+				continue
+			}
+			role = "user"
+			content = []any{block}
+		}
+		if role != "assistant" {
+			role = "user"
+		}
+		if len(content) == 0 {
+			continue
+		}
+		normalized = append(normalized, map[string]any{
+			"role":    role,
+			"content": content,
+		})
+	}
+	return normalized
+}
+
+func normalizeSessionArchiveContentBlocks(content any) []any {
+	switch value := content.(type) {
+	case nil:
+		return []any{}
+	case string:
+		if value == "" {
+			return []any{}
+		}
+		return []any{map[string]any{
+			"type": "text",
+			"text": value,
+		}}
+	case []any:
+		blocks := make([]any, 0, len(value))
+		for _, item := range value {
+			if block, ok := normalizeSessionArchiveContentBlock(item); ok {
+				blocks = append(blocks, block)
+			}
+		}
+		return blocks
+	default:
+		if block, ok := normalizeSessionArchiveContentBlock(value); ok {
+			return []any{block}
+		}
+		return []any{}
+	}
+}
+
+func normalizeSessionArchiveContentBlock(item any) (map[string]any, bool) {
+	if text, ok := item.(string); ok {
+		if text == "" {
+			return nil, false
+		}
+		return map[string]any{"type": "text", "text": text}, true
+	}
+	block, ok := mapFromAny(item)
+	if !ok {
+		if text := rawJSONString(item); text != "" {
+			return map[string]any{"type": "text", "text": text}, true
+		}
+		return nil, false
+	}
+
+	blockType := firstNonEmpty(stringFromAny(block["type"]), inferSessionArchiveContentBlockType(block))
+	switch blockType {
+	case "input_text", "output_text":
+		blockType = "text"
+	case "reasoning", "reasoning_content", "thinking", "image", "document":
+		return nil, false
+	case "function_call":
+		normalized := normalizeSessionArchiveFunctionCallBlock(block)
+		return normalized, normalized != nil
+	case "function_call_output":
+		normalized := normalizeSessionArchiveFunctionCallOutputBlock(block)
+		return normalized, normalized != nil
+	}
+
+	normalized := map[string]any{"type": blockType}
+	switch blockType {
+	case "text":
+		text := firstNonEmpty(stringFromAny(block["text"]), stringFromAny(block["content"]))
+		if text == "" {
+			return nil, false
+		}
+		normalized["text"] = text
+	case "tool_use":
+		id := firstNonEmpty(stringFromAny(block["id"]), stringFromAny(block["call_id"]))
+		name := stringFromAny(block["name"])
+		input := sessionArchiveToolInput(block["input"])
+		if id == "" || name == "" {
+			return nil, false
+		}
+		normalized["id"] = id
+		normalized["name"] = name
+		normalized["input"] = ensureSessionArchiveObject(input)
+	case "tool_result":
+		id := firstNonEmpty(stringFromAny(block["tool_use_id"]), stringFromAny(block["tool_call_id"]), stringFromAny(block["call_id"]), stringFromAny(block["id"]))
+		if id == "" {
+			return nil, false
+		}
+		normalized["tool_use_id"] = id
+		normalized["content"] = sessionArchiveToolResultContent(block["content"])
+		isError, ok := boolFromAny(block["is_error"])
+		if !ok {
+			isError = false
+		}
+		normalized["is_error"] = isError
+	default:
+		return nil, false
+	}
+	return normalized, true
+}
+
+func inferSessionArchiveContentBlockType(block map[string]any) string {
+	switch {
+	case block["tool_use_id"] != nil || block["tool_call_id"] != nil:
+		return "tool_result"
+	case block["id"] != nil && block["name"] != nil && block["input"] != nil:
+		return "tool_use"
+	case block["text"] != nil || block["content"] != nil:
+		return "text"
+	default:
+		return ""
+	}
+}
+
+func normalizeSessionArchiveToolCallBlocks(value any) []any {
+	toolCalls, ok := sliceFromAny(value)
+	if !ok {
+		return nil
+	}
+	blocks := make([]any, 0, len(toolCalls))
+	for _, toolCallAny := range toolCalls {
+		toolCall, ok := mapFromAny(toolCallAny)
+		if !ok {
+			continue
+		}
+		if block := normalizeSessionArchiveFunctionCallBlock(toolCall); block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func normalizeSessionArchiveFunctionCallBlock(block map[string]any) map[string]any {
+	function, _ := mapFromAny(block["function"])
+	normalized := map[string]any{"type": "tool_use"}
+	id := firstNonEmpty(stringFromAny(block["id"]), stringFromAny(block["call_id"]))
+	if id == "" {
+		id = "toolu_" + shortSHA256(rawJSONString(block))
+	}
+	name := firstNonEmpty(stringFromAny(block["name"]), stringFromAny(function["name"]))
+	if name == "" {
+		return nil
+	}
+	normalized["id"] = id
+	normalized["name"] = name
+	arguments := firstNonNil(function["arguments"], block["arguments"], block["input"])
+	normalized["input"] = ensureSessionArchiveObject(sessionArchiveToolInput(arguments))
+	return normalized
+}
+
+func normalizeSessionArchiveFunctionCallOutputBlock(block map[string]any) map[string]any {
+	normalized := map[string]any{"type": "tool_result"}
+	id := firstNonEmpty(stringFromAny(block["call_id"]), stringFromAny(block["tool_call_id"]), stringFromAny(block["id"]))
+	if id == "" {
+		return nil
+	}
+	normalized["tool_use_id"] = id
+	normalized["content"] = sessionArchiveToolResultContent(firstNonNil(block["output"], block["content"]))
+	isError, ok := boolFromAny(block["is_error"])
+	if !ok {
+		isError = false
+	}
+	normalized["is_error"] = isError
+	return normalized
+}
+
+func normalizeSessionArchiveToolResultBlock(message map[string]any) map[string]any {
+	normalized := map[string]any{"type": "tool_result"}
+	id := firstNonEmpty(stringFromAny(message["tool_use_id"]), stringFromAny(message["tool_call_id"]), stringFromAny(message["call_id"]), stringFromAny(message["id"]))
+	if id == "" {
+		return nil
+	}
+	normalized["tool_use_id"] = id
+	normalized["content"] = sessionArchiveToolResultContent(message["content"])
+	isError, ok := boolFromAny(message["is_error"])
+	if !ok {
+		isError = false
+	}
+	normalized["is_error"] = isError
+	return normalized
+}
+
+func normalizeSessionArchiveTools(tools []any) []any {
+	if len(tools) == 0 {
+		return nil
+	}
+	normalized := make([]any, 0, len(tools))
+	for _, toolAny := range tools {
+		tool, ok := mapFromAny(toolAny)
+		if !ok {
+			continue
+		}
+		function, _ := mapFromAny(tool["function"])
+		item := map[string]any{}
+		if name := firstNonEmpty(stringFromAny(tool["name"]), stringFromAny(function["name"])); name != "" {
+			item["name"] = name
+		}
+		if description := firstNonEmpty(stringFromAny(tool["description"]), stringFromAny(function["description"])); description != "" {
+			item["description"] = description
+		}
+		if inputSchema := firstNonNil(tool["input_schema"], tool["inputSchema"], tool["parameters"], function["parameters"]); inputSchema != nil {
+			item["input_schema"] = inputSchema
+		}
+		if item["name"] != nil {
+			normalized = append(normalized, item)
+		}
+	}
+	return normalized
+}
+
+func sessionArchiveToolInput(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil
+		}
+		var parsed any
+		if err := common.UnmarshalJsonStr(trimmed, &parsed); err == nil {
+			return parsed
+		}
+		return map[string]any{"arguments": typed}
+	case []byte:
+		return sessionArchiveToolInput(string(typed))
+	default:
+		if _, ok := mapFromAny(value); ok {
+			return value
+		}
+		return map[string]any{"value": value}
+	}
+}
+
+func ensureSessionArchiveObject(value any) map[string]any {
+	if object, ok := mapFromAny(value); ok {
+		return object
+	}
+	if value == nil {
+		return map[string]any{}
+	}
+	return map[string]any{"value": value}
+}
+
+func sessionArchiveToolResultContent(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	default:
+		if text := contentText(value); text != "" {
+			return text
+		}
+		return rawJSONString(value)
+	}
+}
+
+func appendSessionArchiveAssistantOutput(requestObject any, responseText string, toolCalls []SessionToolCall) any {
+	object, ok := mapFromAny(requestObject)
+	if !ok {
+		object = map[string]any{}
+	}
+	messages, _ := sliceFromAny(object["messages"])
+	content := make([]any, 0, 1+len(toolCalls))
+	if strings.TrimSpace(responseText) != "" {
+		content = append(content, map[string]any{
+			"type": "text",
+			"text": responseText,
+		})
+	}
+	for _, call := range toolCalls {
+		block := sessionArchiveToolCallContentBlock(call)
+		if block != nil {
+			content = append(content, block)
+		}
+	}
+	if len(content) > 0 {
+		messages = append(messages, map[string]any{
+			"role":    "assistant",
+			"content": content,
+		})
+	}
+	object["messages"] = messages
+	return object
+}
+
+func sessionArchiveToolCallContentBlock(call SessionToolCall) map[string]any {
+	id := firstNonEmpty(call.CallID, call.ID)
+	if id == "" {
+		id = "toolu_" + shortSHA256(firstNonEmpty(call.Name, call.Arguments, rawJSONString(call.Raw)))
+	}
+	name := strings.TrimSpace(call.Name)
+	if name == "" {
+		return nil
+	}
+	return map[string]any{
+		"type":  "tool_use",
+		"id":    id,
+		"name":  name,
+		"input": ensureSessionArchiveObject(sessionArchiveToolInput(call.Arguments)),
+	}
+}
+
+func ensureSessionArchiveToolDefinitions(requestObject any) any {
+	object, ok := mapFromAny(requestObject)
+	if !ok {
+		return requestObject
+	}
+	toolNames := sessionArchiveToolUseNames(object["messages"])
+	if len(toolNames) == 0 {
+		return object
+	}
+	existing := make(map[string]bool, len(toolNames))
+	tools, _ := sliceFromAny(object["tools"])
+	for _, toolAny := range tools {
+		tool, ok := mapFromAny(toolAny)
+		if !ok {
+			continue
+		}
+		if name := stringFromAny(tool["name"]); name != "" {
+			existing[name] = true
+		}
+	}
+	for _, name := range toolNames {
+		if existing[name] {
+			continue
+		}
+		tools = append(tools, map[string]any{"name": name})
+		existing[name] = true
+	}
+	if len(tools) > 0 {
+		object["tools"] = tools
+	}
+	return object
+}
+
+func filterSessionArchiveOrphanToolResults(requestObject any) any {
+	object, ok := mapFromAny(requestObject)
+	if !ok {
+		return requestObject
+	}
+	toolUseIDs := sessionArchiveToolUseIDs(object["messages"])
+	if len(toolUseIDs) == 0 {
+		return object
+	}
+	messages, ok := sliceFromAny(object["messages"])
+	if !ok {
+		return object
+	}
+	filteredMessages := make([]any, 0, len(messages))
+	for _, messageAny := range messages {
+		message, ok := mapFromAny(messageAny)
+		if !ok {
+			continue
+		}
+		content, ok := sliceFromAny(message["content"])
+		if !ok {
+			filteredMessages = append(filteredMessages, message)
+			continue
+		}
+		filteredContent := make([]any, 0, len(content))
+		for _, blockAny := range content {
+			block, ok := mapFromAny(blockAny)
+			if !ok || stringFromAny(block["type"]) != "tool_result" {
+				filteredContent = append(filteredContent, blockAny)
+				continue
+			}
+			if toolUseIDs[stringFromAny(block["tool_use_id"])] {
+				filteredContent = append(filteredContent, block)
+			}
+		}
+		if len(filteredContent) == 0 {
+			continue
+		}
+		message["content"] = filteredContent
+		filteredMessages = append(filteredMessages, message)
+	}
+	object["messages"] = filteredMessages
+	return object
+}
+
+func sessionArchiveToolUseIDs(messagesAny any) map[string]bool {
+	messages, ok := sliceFromAny(messagesAny)
+	if !ok {
+		return nil
+	}
+	ids := make(map[string]bool)
+	for _, messageAny := range messages {
+		message, ok := mapFromAny(messageAny)
+		if !ok || stringFromAny(message["role"]) != "assistant" {
+			continue
+		}
+		content, ok := sliceFromAny(message["content"])
+		if !ok {
+			continue
+		}
+		for _, blockAny := range content {
+			block, ok := mapFromAny(blockAny)
+			if !ok || stringFromAny(block["type"]) != "tool_use" {
+				continue
+			}
+			if id := stringFromAny(block["id"]); id != "" {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}
+
+func sessionArchiveToolUseNames(messagesAny any) []string {
+	messages, ok := sliceFromAny(messagesAny)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, messageAny := range messages {
+		message, ok := mapFromAny(messageAny)
+		if !ok || stringFromAny(message["role"]) != "assistant" {
+			continue
+		}
+		content, ok := sliceFromAny(message["content"])
+		if !ok {
+			continue
+		}
+		for _, blockAny := range content {
+			block, ok := mapFromAny(blockAny)
+			if !ok || stringFromAny(block["type"]) != "tool_use" {
+				continue
+			}
+			name := stringFromAny(block["name"])
+			if name == "" || seen[name] {
+				continue
+			}
+			names = append(names, name)
+			seen[name] = true
+		}
+	}
+	return names
+}
+
+func sessionArchiveRecordHasUsableContext(record *SessionArchiveRecord) bool {
+	if record == nil {
+		return false
+	}
+	requestObject, ok := mapFromAny(record.RequestObject)
+	if !ok {
+		return false
+	}
+	tools, ok := sliceFromAny(requestObject["tools"])
+	if ok && len(tools) > 0 {
+		return true
+	}
+	for _, messageAny := range sessionArchiveRecordMessages(record) {
+		message, ok := mapFromAny(messageAny)
+		if !ok {
+			continue
+		}
+		role := stringFromAny(message["role"])
+		content, ok := sliceFromAny(message["content"])
+		if !ok || len(content) == 0 {
+			continue
+		}
+		if role == "user" {
+			return true
+		}
+		for _, blockAny := range content {
+			block, ok := mapFromAny(blockAny)
+			if !ok {
+				continue
+			}
+			switch stringFromAny(block["type"]) {
+			case "tool_use", "tool_result":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sessionArchiveRecordHasAssistantOutput(record *SessionArchiveRecord) bool {
+	if record == nil {
+		return false
+	}
+	for _, messageAny := range sessionArchiveRecordMessages(record) {
+		message, ok := mapFromAny(messageAny)
+		if !ok || stringFromAny(message["role"]) != "assistant" {
+			continue
+		}
+		content, ok := sliceFromAny(message["content"])
+		if !ok {
+			continue
+		}
+		for _, blockAny := range content {
+			block, ok := mapFromAny(blockAny)
+			if !ok {
+				continue
+			}
+			switch stringFromAny(block["type"]) {
+			case "text":
+				if stringFromAny(block["text"]) != "" {
+					return true
+				}
+			case "tool_use":
+				if stringFromAny(block["id"]) != "" && stringFromAny(block["name"]) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func rewriteArchiveModelFields(value any, archiveModelName string) any {
@@ -589,6 +1612,18 @@ func slimSessionRequestHeaders(headers map[string]string) map[string]string {
 	return nil
 }
 
+func rawSessionArchiveUserAgent(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), "user-agent") {
+			return value
+		}
+	}
+	return ""
+}
+
 func sessionArchiveUserAgent(headers map[string]string) string {
 	if len(headers) == 0 {
 		return ""
@@ -606,22 +1641,22 @@ func slimSessionArchiveUsage(usage any) *SessionArchiveUsageRecord {
 	case nil:
 		return nil
 	case *SessionArchiveUsageRecord:
-		if typed == nil || (typed.PromptTokens == 0 && typed.CompletionTokens == 0 && typed.TotalTokens == 0) {
+		if typed == nil || (typed.InputTokens == 0 && typed.OutputTokens == 0 && typed.TotalTokens == 0) {
 			return nil
 		}
 		return &SessionArchiveUsageRecord{
-			PromptTokens:     typed.PromptTokens,
-			CompletionTokens: typed.CompletionTokens,
-			TotalTokens:      typed.TotalTokens,
+			InputTokens:  typed.InputTokens,
+			OutputTokens: typed.OutputTokens,
+			TotalTokens:  typed.TotalTokens,
 		}
 	case *dto.Usage:
 		if typed == nil || (typed.PromptTokens == 0 && typed.CompletionTokens == 0 && typed.TotalTokens == 0) {
 			return nil
 		}
 		return &SessionArchiveUsageRecord{
-			PromptTokens:     typed.PromptTokens,
-			CompletionTokens: typed.CompletionTokens,
-			TotalTokens:      typed.TotalTokens,
+			InputTokens:  typed.PromptTokens,
+			OutputTokens: typed.CompletionTokens,
+			TotalTokens:  typed.TotalTokens,
 		}
 	default:
 		usageMap, ok := mapFromAny(typed)
@@ -629,11 +1664,14 @@ func slimSessionArchiveUsage(usage any) *SessionArchiveUsageRecord {
 			return nil
 		}
 		slimmed := &SessionArchiveUsageRecord{
-			PromptTokens:     intFromAny(usageMap["prompt_tokens"]),
-			CompletionTokens: intFromAny(usageMap["completion_tokens"]),
-			TotalTokens:      intFromAny(usageMap["total_tokens"]),
+			InputTokens:  intFromAny(firstNonNil(usageMap["input_tokens"], usageMap["prompt_tokens"])),
+			OutputTokens: intFromAny(firstNonNil(usageMap["output_tokens"], usageMap["completion_tokens"])),
+			TotalTokens:  intFromAny(usageMap["total_tokens"]),
 		}
-		if slimmed.PromptTokens == 0 && slimmed.CompletionTokens == 0 && slimmed.TotalTokens == 0 {
+		if slimmed.TotalTokens == 0 {
+			slimmed.TotalTokens = slimmed.InputTokens + slimmed.OutputTokens
+		}
+		if slimmed.InputTokens == 0 && slimmed.OutputTokens == 0 && slimmed.TotalTokens == 0 {
 			return nil
 		}
 		return slimmed
@@ -733,10 +1771,7 @@ func resolveSessionID(c *gin.Context, info *relaycommon.RelayInfo, request dto.R
 	if id, source := sessionIDFromRawBody(rawRequestBody); id != "" {
 		return id, source
 	}
-	if info != nil && strings.TrimSpace(info.RequestId) != "" {
-		return info.RequestId, "request_id"
-	}
-	return common.GetTimeString(), "generated"
+	return "", ""
 }
 
 func sessionIDFromRequest(request dto.Request) (string, string) {
@@ -1111,13 +2146,9 @@ func textFromPayload(payload any) string {
 				}
 				if msg, ok := mapFromAny(choice["message"]); ok {
 					builder.WriteString(contentText(msg["content"]))
-					builder.WriteString(stringFromAny(msg["reasoning_content"]))
-					builder.WriteString(stringFromAny(msg["reasoning"]))
 				}
 				if delta, ok := mapFromAny(choice["delta"]); ok {
 					builder.WriteString(contentText(delta["content"]))
-					builder.WriteString(stringFromAny(delta["reasoning_content"]))
-					builder.WriteString(stringFromAny(delta["reasoning"]))
 				}
 			}
 		}
@@ -1131,10 +2162,12 @@ func textFromPayload(payload any) string {
 				builder.WriteString(stringFromAny(output["text"]))
 			}
 		}
+		if stringFromAny(value["type"]) == "output_text" {
+			builder.WriteString(stringFromAny(value["text"]))
+		}
 		builder.WriteString(contentText(value["content"]))
 		if delta, ok := mapFromAny(value["delta"]); ok {
 			builder.WriteString(contentText(delta["text"]))
-			builder.WriteString(contentText(delta["thinking"]))
 		}
 		builder.WriteString(stringFromAny(value["text"]))
 		return builder.String()
@@ -1407,6 +2440,15 @@ func rawJSONString(value any) string {
 	return string(bytes)
 }
 
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -1414,6 +2456,43 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sessionArchiveRawFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func boolFromAny(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1", "yes", "y":
+			return true, true
+		case "false", "0", "no", "n":
+			return false, true
+		default:
+			return false, false
+		}
+	case int:
+		return typed != 0, true
+	case int64:
+		return typed != 0, true
+	case int32:
+		return typed != 0, true
+	case float64:
+		return typed != 0, true
+	case float32:
+		return typed != 0, true
+	default:
+		return false, false
+	}
 }
 
 func cloneJSONValue(value any) any {
