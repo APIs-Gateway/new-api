@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -179,12 +180,14 @@ func (w *sessionArchiveResponseWriter) WriteString(s string) (int, error) {
 	return n, err
 }
 
-func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, request dto.Request, rawRequestBody string) *SessionArchiveCapture {
+func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, request dto.Request, rawRequestBody string) (capture *SessionArchiveCapture) {
+	defer recoverSessionArchivePanic(c, "start capture")
+
 	if !common.SessionArchiveEnabled || c == nil || info == nil {
 		return nil
 	}
-	if capture := getSessionArchiveCapture(c); capture != nil {
-		return capture
+	if existing := getSessionArchiveCapture(c); existing != nil {
+		return existing
 	}
 	if rawRequestBody == "" && request != nil {
 		rawRequestBody = common.GetJsonString(request)
@@ -199,7 +202,7 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 	if startedAt.IsZero() {
 		startedAt = time.Now()
 	}
-	capture := &SessionArchiveCapture{
+	capture = &SessionArchiveCapture{
 		startedAt:        startedAt,
 		requestModelName: requestModelName,
 		archiveModelName: archiveModelName,
@@ -217,6 +220,8 @@ func StartSessionArchiveCapture(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 func AppendSessionArchiveWSMessage(c *gin.Context, kind string, payload string) {
+	defer recoverSessionArchivePanic(c, "append websocket message")
+
 	if !common.SessionArchiveEnabled || payload == "" {
 		return
 	}
@@ -228,6 +233,8 @@ func AppendSessionArchiveWSMessage(c *gin.Context, kind string, payload string) 
 }
 
 func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request dto.Request, newAPIError *types.NewAPIError) {
+	defer recoverSessionArchivePanic(c, "finalize")
+
 	if !common.SessionArchiveEnabled || c == nil || info == nil {
 		return
 	}
@@ -238,14 +245,21 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 
 	responseBody := capture.snapshotResponse()
 	responseUsage := slimSessionArchiveUsage(extractResponseUsage(responseBody))
-	responseHTTPStatus := c.Writer.Status()
+	responseHTTPStatus := 0
+	if c.Writer != nil {
+		responseHTTPStatus = c.Writer.Status()
+	}
 	if responseHTTPStatus == 0 && newAPIError != nil {
 		responseHTTPStatus = newAPIError.StatusCode
 	}
 	responseText := extractResponseText(responseBody)
+	requestMethod := ""
+	if c.Request != nil {
+		requestMethod = c.Request.Method
+	}
 	rawRecord := &sessionArchiveRawRecord{
 		RecordType:         sessionArchiveRecordType,
-		RequestMethod:      c.Request.Method,
+		RequestMethod:      requestMethod,
 		IsStream:           info.IsStream,
 		OriginModelName:    capture.archiveModelName,
 		UpstreamModel:      capture.archiveModelName,
@@ -289,6 +303,15 @@ func FinalizeSessionArchive(c *gin.Context, info *relaycommon.RelayInfo, request
 		common.SysError("failed to write session archive: " + err.Error())
 	}
 	common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, nil)
+}
+
+func recoverSessionArchivePanic(c *gin.Context, stage string) {
+	if err := recover(); err != nil {
+		common.SysError(fmt.Sprintf("session archive %s panic: %v\n%s", stage, err, string(debug.Stack())))
+		if c != nil {
+			common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, nil)
+		}
+	}
 }
 
 func (c *SessionArchiveCapture) appendHTTPResponse(data []byte) {
@@ -683,7 +706,11 @@ func sessionArchiveKeySeed(info *relaycommon.RelayInfo) string {
 	if info == nil {
 		return ""
 	}
-	return firstNonEmpty(info.OriginModelName, info.UpstreamModelName)
+	upstreamModelName := ""
+	if info.ChannelMeta != nil {
+		upstreamModelName = info.ChannelMeta.UpstreamModelName
+	}
+	return firstNonEmpty(info.OriginModelName, upstreamModelName)
 }
 
 func shortSHA256(value string) string {
@@ -1759,7 +1786,7 @@ func isSensitiveHeader(key string) bool {
 
 func resolveSessionID(c *gin.Context, info *relaycommon.RelayInfo, request dto.Request, rawRequestBody string) (string, string) {
 	for _, header := range []string{"X-Session-Id", "X-Session-ID", "Session-Id", "Session-ID", "Session_id", "SessionID", "session_id", "sessionId", "sessionid", "X-Conversation-Id", "Conversation-Id"} {
-		if c != nil {
+		if c != nil && c.Request != nil {
 			if value := strings.TrimSpace(c.Request.Header.Get(header)); value != "" {
 				return value, "header:" + header
 			}

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,7 +10,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestBuildCleanSessionArchiveRecordMinimalSchema(t *testing.T) {
@@ -363,6 +368,53 @@ func TestExplicitSessionArchiveKeyIgnoresRequestID(t *testing.T) {
 	}
 }
 
+func TestSessionArchiveKeySeedWithoutChannelMeta(t *testing.T) {
+	info := &relaycommon.RelayInfo{OriginModelName: "gpt-test"}
+	if got := sessionArchiveKeySeed(info); got != "gpt-test" {
+		t.Fatalf("unexpected key seed without channel meta: %q", got)
+	}
+}
+
+func TestStartSessionArchiveCaptureWithoutChannelMeta(t *testing.T) {
+	originalEnabled := common.SessionArchiveEnabled
+	common.SessionArchiveEnabled = true
+	defer func() {
+		common.SessionArchiveEnabled = originalEnabled
+	}()
+
+	common.OptionMapRWMutex.Lock()
+	originalEnabledModels, hadEnabledModels := common.OptionMap[common.SessionArchiveEnabledModelsOptionKey]
+	common.OptionMap[common.SessionArchiveEnabledModelsOptionKey] = `["gpt-test"]`
+	common.OptionMapRWMutex.Unlock()
+	defer func() {
+		common.OptionMapRWMutex.Lock()
+		if hadEnabledModels {
+			common.OptionMap[common.SessionArchiveEnabledModelsOptionKey] = originalEnabledModels
+		} else {
+			delete(common.OptionMap, common.SessionArchiveEnabledModelsOptionKey)
+		}
+		common.OptionMapRWMutex.Unlock()
+	}()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test"}`))
+
+	defer func() {
+		if err := recover(); err != nil {
+			t.Fatalf("StartSessionArchiveCapture should not panic: %v", err)
+		}
+	}()
+
+	capture := StartSessionArchiveCapture(c, &relaycommon.RelayInfo{
+		OriginModelName: "gpt-test",
+		RequestHeaders:  map[string]string{"User-Agent": "unit-test/1.0"},
+	}, nil, `{"model":"gpt-test","messages":[{"role":"user","content":"ping"}]}`)
+	if capture == nil {
+		t.Fatal("expected session archive capture")
+	}
+}
+
 func TestShouldKeepSessionArchiveRecord(t *testing.T) {
 	base := &sessionArchiveRawRecord{
 		TurnComplete:       true,
@@ -544,6 +596,41 @@ func TestWriteSessionArchiveDailySummary(t *testing.T) {
 	if summary.Models["wrong"] != nil {
 		t.Fatalf("summary should use archive directory name, got models: %#v", summary.Models)
 	}
+}
+
+func TestFinalizeSessionArchiveIgnoresPartialGinContext(t *testing.T) {
+	tempDir := t.TempDir()
+	originalDir := common.SessionArchiveDir
+	originalEnabled := common.SessionArchiveEnabled
+	common.SessionArchiveDir = tempDir
+	common.SessionArchiveEnabled = true
+	defer func() {
+		common.SessionArchiveDir = originalDir
+		common.SessionArchiveEnabled = originalEnabled
+	}()
+
+	c := &gin.Context{}
+	capture := &SessionArchiveCapture{
+		startedAt:        time.Date(2026, 5, 13, 12, 0, 0, 0, time.Local),
+		archiveModelName: "gpt-test",
+		requestObject: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "ping"},
+			},
+		},
+	}
+	capture.appendHTTPResponse([]byte(`{"choices":[{"message":{"content":"pong"}}]}`))
+	common.SetContextKey(c, constant.ContextKeySessionArchiveCapture, capture)
+
+	defer func() {
+		if err := recover(); err != nil {
+			t.Fatalf("FinalizeSessionArchive should not panic: %v", err)
+		}
+	}()
+	FinalizeSessionArchive(c, &relaycommon.RelayInfo{
+		OriginModelName: "gpt-test",
+		RequestHeaders:  map[string]string{"User-Agent": "unit-test/1.0"},
+	}, nil, nil)
 }
 
 func archiveRecordForTest(sessionID string, userText string, responseText string) *SessionArchiveRecord {
